@@ -3,7 +3,7 @@ from decorator import decorator
 from fabric.api import env, execute, parallel, run
 import sys
 
-details_file = sys.argv[0]
+details_file = sys.argv[1]
 
 host = "ec2-{}.compute-1.amazonaws.com"
 env.user = 'ec2-user'
@@ -20,7 +20,10 @@ ip_list_public_dns = []
 for reservation in reservations:
     instances = reservation["Instances"]
     for instance in instances:
-        tags = instance["Tags"]
+        if "Tags" in instance:
+            tags = instance["Tags"]
+        else:
+            continue
         for tag in tags:
             if tag["Key"] == "aws:cloudformation:stack-name" and tag["Value"] == "a-test":
                 if "PublicIpAddress" in instance:
@@ -49,10 +52,10 @@ def make_ssh_ready():
     run("sudo service sshd restart")
 
 def make_ips_file():
-    server_format = "\"{}\","
+    servers = "\",\"".join(ip_list_public)
+    servers = "\"" + servers + "\""
     with open("ips.txt", "w") as fp:
-        for ip in ip_list_public:
-            fp.write(server_format.format(ip))
+        fp.write(servers)
 
 make_ssh_ready()
 make_ips_file()
