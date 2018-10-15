@@ -7,6 +7,7 @@ class HANDLER_CODE:
     BUCKET_OPS_WITH_DOC_TIMER = 'handler_code/bucket_op_with_doc_timer.js'
     BUCKET_OPS_WITH_DOC_TIMER1 = 'handler_code/bucket_op_with_doc_timer1.js'
     BUCKET_OPS_WITH_DOC_TIMER2 = 'handler_code/bucket_op_with_doc_timer2.js'
+    BUCKET_OPS_WITH_TIMER_WITHOUT_CONTEXT = 'handler_code/bucket_op_with_timer_without_context.js'
     BUCKET_OPS_WITH_CRON_TIMER = 'handler_code/bucket_op_with_cron_timer.js'
     BUCKET_OPS_WITH_CRON_TIMER_WITH_SECOND_BUCKET = 'handler_code/bucket_op_on_second_bucket_with_cron_timer.js'
     DELETE_BUCKET_OP_ON_DELETE = 'handler_code/delete_doc_bucket_op.js'
@@ -22,6 +23,7 @@ class HANDLER_CODE:
     READ_BUCKET_OP_ON_DST = 'handler_code/read_bucket_on_dst_bucket.js'
     N1QL_OPS_WITH_TIMERS = 'handler_code/n1ql_op_with_timers.js'
     N1QL_OPS_WITH_TIMERS1 = 'handler_code/n1ql_op_with_timers1.js'
+    N1QL_OPS_WITHOUT_TIMERS = 'handler_code/n1ql_op_without_timers.js'
     N1QL_DELETE_UPDATE = 'handler_code/n1ql_delete_update.js'
     N1QL_PREPARE = 'handler_code/n1ql_prepare.js'
     N1QL_DDL = 'handler_code/n1ql_DDL.js'
@@ -44,6 +46,7 @@ class HANDLER_CODE:
     BUCKET_OP_WITH_RAND = 'handler_code/bucket_op_rand.js'
     BUCKET_OP_WITH_DOC_TIMER_RAND = 'handler_code/bucket_op_with_doc_timer_rand.js'
     BUCKET_OP_WITH_CRON_TIMER_RAND = 'handler_code/bucket_op_with_cron_timer_rand.js'
+    BUCKET_OP_WITH_TIMER_OVERWRITTEN = 'handler_code/bucket_op_with_timers_overwritten.js'
 
 class HANDLER_CODE_ERROR:
     N1QL_SYNTAX='handler_code/handler_code_error/n1ql_syntax.js'
@@ -58,4 +61,5 @@ class HANDLER_CODE_ERROR:
 class EXPORTED_FUNCTION:
     N1QL_INSERT_ON_UPDATE_WITH_CRON_TIMER = 'exported_functions/n1ql_insert_with_cron_timer.json'
     BUCKET_OP = 'exported_functions/bucket_op.json'
+    BUCKET_OP_WITH_TIMER = 'exported_functions/bucket_op_with_timer.json'
     NEW_BUCKET_OP ='exported_functions/Function_396275055_test_export_function.json'

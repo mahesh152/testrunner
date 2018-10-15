@@ -59,6 +59,7 @@ Available keys:
  upr=True                   Enable UPR replication
  xdcr_upr=                  Enable UPR for XDCR (temporary param until XDCR with UPR is stable), values: None | True | False
  fts_query_limit=1000000    Set a limit for the max results to be returned by fts for any query
+ cbft_env_options           Additional fts environment variables
  change_indexer_ports=false Sets indexer ports values to non-default ports
  storage_mode=plasma        Sets indexer storage mode
  enable_ipv6=False          Enable ipv6 mode in ns_server
@@ -251,7 +252,6 @@ class Installer(object):
                 """
                 if "2k8" in info.windows_name:
                     info.windows_name = 2008
-
                 if msi_build[0] in COUCHBASE_FROM_SPOCK:
                     info.deliverable_type = "msi"
                 elif "5" > msi_build[0] and info.windows_name == 2016:
@@ -281,7 +281,6 @@ class Installer(object):
             elif "server-analytics" in names:
                 build_repo = CB_REPO.replace("couchbase-server", "server-analytics") + CB_VERSION_NAME[version[:3]] + "/"
             elif "moxi-server" in names and version[:5] != "2.5.2":
-                print "version   ", version
                 """
                 moxi repo:
                    http://172.23.120.24/builds/latestbuilds/moxi/4.6.0/101/moxi-server..
@@ -346,8 +345,11 @@ class Installer(object):
                             #build.url = build.url.replace("enterprise", "community")
                             #build.name = build.name.replace("enterprise", "community")
                     """ check if URL is live """
+                    url_valid = False
                     remote_client = RemoteMachineShellConnection(server)
-                    if remote_client.is_url_live(build.url):
+                    url_valid = remote_client.is_url_live(build.url)
+                    remote_client.disconnect()
+                    if url_valid:
                         return build
                     else:
                         sys.exit("ERROR: URL is not good. Check URL again")
@@ -680,6 +682,12 @@ class CouchbaseServerInstaller(Installer):
         else:
             enable_ipv6 = None
 
+        if "cbft_env_options" in params:
+            cbft_env_options = params["cbft_env_options"]
+            start_server = False
+        else:
+            cbft_env_options = None
+
         if "linux_repo" in params and params["linux_repo"].lower() == "true":
             linux_repo = True
         else:
@@ -702,6 +710,7 @@ class CouchbaseServerInstaller(Installer):
                                        params["version"].replace("-rel", ""),
                                        vbuckets=vbuckets,
                                        fts_query_limit=fts_query_limit,
+                                       cbft_env_options=cbft_env_options,
                                        enable_ipv6=enable_ipv6,
                                        windows_msi=self.msi )
             else:
@@ -716,9 +725,10 @@ class CouchbaseServerInstaller(Installer):
                     success = remote_client.install_server(build, path=path,
                                          startserver=start_server,\
                                          vbuckets=vbuckets, swappiness=swappiness,\
-                                        openssl=openssl, upr=upr, xdcr_upr=xdcr_upr,
-                                        fts_query_limit=fts_query_limit,
-                                        enable_ipv6=enable_ipv6)
+                                         openssl=openssl, upr=upr, xdcr_upr=xdcr_upr,
+                                         fts_query_limit=fts_query_limit,
+                                         cbft_env_options= cbft_env_options,
+                                         enable_ipv6=enable_ipv6)
                     log.info('wait 5 seconds for Couchbase server to start')
                     time.sleep(5)
                     if "rest_vbuckets" in params:
@@ -1013,7 +1023,9 @@ class InstallerJob(object):
                 if "product" in params and params["product"] in ["couchbase", "couchbase-server", "cb"]:
                     success = True
                     for server in servers:
-                        success &= not RemoteMachineShellConnection(server).is_couchbase_installed()
+                        shell = RemoteMachineShellConnection(server)
+                        success &= not shell.is_couchbase_installed()
+                        shell.disconnect()
                     if not success:
                         print "Server:{0}.Couchbase is still" + \
                               " installed after uninstall".format(server)
@@ -1067,7 +1079,9 @@ class InstallerJob(object):
         if "product" in params and params["product"] in ["couchbase", "couchbase-server", "cb"]:
             success = True
             for server in servers:
-                success &= not RemoteMachineShellConnection(server).is_couchbase_installed()
+                shell = RemoteMachineShellConnection(server)
+                success &= not shell.is_couchbase_installed()
+                shell.disconnect()
             if not success:
                 print "Server:{0}.Couchbase is still installed after uninstall".format(server)
                 return success
@@ -1095,6 +1109,7 @@ class InstallerJob(object):
                 shell = RemoteMachineShellConnection(server)
                 shell.execute_command("rm -f /cygdrive/c/automation/*_172.23*")
                 shell.execute_command("rm -f /cygdrive/c/automation/*_10.17*")
+                shell.disconnect()
                 os.system("rm -f resources/windows/automation/*_172.23*")
                 os.system("rm -f resources/windows/automation/*_10.17*")
         return success
@@ -1221,7 +1236,10 @@ def main():
         print "verify installation..."
         success = True
         for server in input.servers:
-            success &= RemoteMachineShellConnection(server).is_couchbase_installed()
+            success= RemoteMachineShellConnection(server).is_couchbase_installed()
+            if not success:
+                print("installation failed on:{}".format(server))
+            success &= success
         if not success:
             sys.exit(log_install_failed)
     if "product" in input.test_params and input.test_params["product"] in ["moxi", "moxi-server"]:

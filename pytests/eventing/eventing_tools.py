@@ -217,11 +217,13 @@ class EventingTools(EventingBaseTest, EnterpriseBackupRestoreBase, NewUpgradeBas
         self.backup_create_validate()
         self.backup_cluster()
         self.backup_list()
+        self.cluster.rebalance([self.servers[1]], [self.servers[2]], [], services=["eventing"])
         try:
             self.backup_restore_validate()
         except Exception as ex:
             if "Extra elements found in the actual metadata Data" not in str(ex):
                 self.fail("restore failed : {0}".format(str(ex)))
+        self.cluster.rebalance([self.servers[1]], [], [self.servers[2]])
 
     def test_eventing_lifecycle_with_couchbase_cli(self):
         # load some data in the source bucket
@@ -253,7 +255,7 @@ class EventingTools(EventingBaseTest, EnterpriseBackupRestoreBase, NewUpgradeBas
                                      file_name="Function_396275055_test_export_function.json")
         # deploy the function
         self._couchbase_cli_eventing(eventing_node, "Function_396275055_test_export_function", "deploy",
-                                     "SUCCESS: Function deployed")
+                                     "SUCCESS: Request to deploy the function was accepted")
         self.verify_eventing_results("Function_396275055_test_export_function", self.docs_per_day * 2016,
                                      skip_stats_validation=True)
         # list the function
@@ -268,17 +270,29 @@ class EventingTools(EventingBaseTest, EnterpriseBackupRestoreBase, NewUpgradeBas
         # check if the exported file exists
         if not exists:
             self.fail("file does not exist after export")
+        # export-all functions
+        self._couchbase_cli_eventing(eventing_node, "Function_396275055_test_export_function", "export-all",
+                                     "SUCCESS: All functions exported to: export_all.json",
+                                    file_name="export_all.json", name=False)
+        # check if the exported function actually exists
+        exists = remote_client.file_exists("/root", "export_all.json")
+        # check if the exported file exists
+        if not exists:
+            self.fail("file does not exist after export-all")
         # undeploy the function
         self._couchbase_cli_eventing(eventing_node, "Function_396275055_test_export_function", "undeploy",
-                                     "SUCCESS: Function undeployed")
+                                     "SUCCESS: Request to undeploy the function was accepted")
+        self.sleep(120)
         # delete the function
         self._couchbase_cli_eventing(eventing_node, "Function_396275055_test_export_function", "delete",
-                                     "SUCCESS: Function deleted")
+                                     "SUCCESS: Request to delete the function was accepted")
 
-    def _couchbase_cli_eventing(self, host, function_name, operation, result, file_name=None):
+    def _couchbase_cli_eventing(self, host, function_name, operation, result, file_name=None, name=True):
         remote_client = RemoteMachineShellConnection(host)
-        cmd = "couchbase-cli eventing-function-setup -c {0} -u {1} -p {2} --{3} --name {4}".format(
-            host.ip, host.rest_username, host.rest_password, operation, function_name)
+        cmd = "couchbase-cli eventing-function-setup -c {0} -u {1} -p {2} --{3} ".format(
+            host.ip, host.rest_username, host.rest_password, operation)
+        if name:
+            cmd += " --name {0}".format(function_name)
         if file_name:
             cmd += " --file {0}".format(file_name)
         command = "{0}/{1}".format(self.cli_command_location, cmd)

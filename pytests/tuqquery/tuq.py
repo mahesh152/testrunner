@@ -81,6 +81,7 @@ class QueryTests(BaseTestCase):
         shell.disconnect()
         self.path = testconstants.LINUX_COUCHBASE_BIN_PATH
         self.array_indexing = self.input.param("array_indexing", False)
+        self.load_sample = self.input.param("load_sample", False)
         self.gens_load = self.gen_docs(self.docs_per_day)
         self.skip_load = self.input.param("skip_load", False)
         self.skip_index = self.input.param("skip_index", False)
@@ -123,9 +124,15 @@ class QueryTests(BaseTestCase):
         self.log.info('-'*100)
         self.log.info('Temp fix for MB-16888')
         if self.cluster_ops == False:
-           self.shell.execute_command("killall -9 cbq-engine")
-           self.shell.execute_command("killall -9 indexer")
-           self.sleep(30, 'wait for indexer')
+            output, error = self.shell.execute_command("killall -9 cbq-engine")
+            output1, error1 = self.shell.execute_command("killall -9 indexer")
+            if (len(error) == 0 or len(error1) == 0):
+                self.sleep(30, 'wait for indexer')
+            else:
+                if (len(error) > 0):
+                    self.log.info("Error executing shell command: killall -9 cbq-engine! Error - " + str(error[0]))
+                if (len(error1) > 0):
+                    self.log.info("Error executing shell command: killall -9 indexer! Error - " + str(error1[0]))
         self.log.info('-'*100)
         if self.analytics:
             self.setup_analytics()
@@ -153,6 +160,9 @@ class QueryTests(BaseTestCase):
                 self.cluster.rebalance([self.master, self.cbas_node], [self.cbas_node], [], services=['cbas'])
                 self.setup_analytics()
                 self.sleep(30, 'wait for analytics setup')
+            if self.testrunner_client == 'python_sdk':
+                from couchbase.cluster import Cluster
+                from couchbase.cluster import PasswordAuthenticator
         except Exception, ex:
             self.log.error('SUITE SETUP FAILED')
             self.log.info(ex)
@@ -371,6 +381,22 @@ class QueryTests(BaseTestCase):
             self.log.info("SUCCESS: Role(s) %s assigned to %s"
                           %(user_role['roles'], user_role['id']))
 
+    def does_test_meet_server_version(self, required_major_version = -1, required_minor_version1 = -1, required_minor_version2 = -1):
+        rest = RestConnection(self.master)
+        versions = rest.get_nodes_versions()
+        server_version = versions[0].split('-')[0]
+        server_version_major = int(server_version.split(".")[0])
+        server_version_minor1 = int(server_version.split(".")[1])
+        server_version_minor2 = int(server_version.split(".")[2])
+
+        if server_version_major >= required_major_version:
+            if server_version_minor1 >= required_minor_version1:
+                if server_version_minor2 >= required_minor_version2:
+                    return True
+
+        return False
+
+
 ##############################################################################################
 #
 #   Query Runner
@@ -382,12 +408,20 @@ class QueryTests(BaseTestCase):
         res_dict['errors'] = []
         for test_name in sorted(test_dict.keys()):
             try:
-                index_list = test_dict[test_name]['indexes']
-                pre_queries = test_dict[test_name]['pre_queries']
-                queries = test_dict[test_name]['queries']
-                post_queries = test_dict[test_name]['post_queries']
-                asserts = test_dict[test_name]['asserts']
-                cleanups = test_dict[test_name]['cleanups']
+                res_dict = dict()
+                res_dict['errors'] = []
+                index_list = test_dict[test_name].get('indexes', [
+                    {'name': '#primary',
+                     'bucket': 'default',
+                     'fields': [],
+                     'state': 'online',
+                     'using': self.index_type.lower(),
+                     'is_primary': True}])
+                pre_queries = test_dict[test_name].get('pre_queries', [])
+                queries = test_dict[test_name].get('queries',[])
+                post_queries = test_dict[test_name].get('post_queries',[])
+                asserts = test_dict[test_name].get('asserts',[])
+                cleanups = test_dict[test_name].get('cleanups',[])
 
                 # INDEX STAGE
                 current_indexes = self.get_parsed_indexes()
@@ -559,11 +593,13 @@ class QueryTests(BaseTestCase):
 #
 #   COMMON FUNCTIONS
 ##############################################################################################
-    def ExplainPlanHelper(self, res):
+    def ExplainPlanHelper(self, res, debug=False):
         try:
             rv = res["results"][0]["plan"]
         except:
             rv = res["results"][0]
+        if debug:
+            print(rv)
         return rv
 
     def PreparePlanHelper(self, res):
@@ -839,9 +875,13 @@ class QueryTests(BaseTestCase):
                 query = query + ";"
                 for bucket in self.buckets:
                     query = query.replace(bucket.name, bucket.name + "_shadow")
-                result = RestConnection(self.cbas_node).execute_statement_on_cbas(query,
+                result1 = RestConnection(self.cbas_node).execute_statement_on_cbas(query,
                                                                                   "immediate")
-                result = json.loads(result)
+                try:
+                    result = json.loads(result1)
+                except Exception, ex:
+                    self.log.error("CANNOT LOAD QUERY RESULT IN JSON: %s" % ex.message)
+                    self.log.error("INCORRECT DOCUMENT IS: " + str(result1))
             else:
                 result = rest.query_tool(query, self.n1ql_port, query_params=query_params,
                                          is_prepared=is_prepared, named_prepare=self.named_prepare,
@@ -867,7 +907,11 @@ class QueryTests(BaseTestCase):
                         output1 = '{%s' % output
                     else:
                         output1 = output
-                    result = json.loads(output1)
+                    try:
+                        result = json.loads(output1)
+                    except Exception, ex:
+                        self.log.error("CANNOT LOAD QUERY RESULT IN JSON: %s" % ex.message)
+                        self.log.error("INCORRECT DOCUMENT IS: "+str(output1))
         if isinstance(result, str) or 'errors' in result:
             raise CBQError(result, server.ip)
         if 'metrics' in result:
@@ -1106,8 +1150,22 @@ class QueryTests(BaseTestCase):
             for bucket in self.buckets:
                 if self.primary_indx_drop:
                     self.log.info("Dropping primary index for %s ..." % bucket.name)
-                    self.query = "DROP PRIMARY INDEX ON %s using %s" % (bucket.name, self.primary_indx_type)
-                    self.sleep(6, 'Sleep for some time after index drop')
+                    try:
+                        self.query = "DROP PRIMARY INDEX ON %s using %s" % (
+                            bucket.name, self.primary_indx_type)
+                        self.run_cbq_query(self.query)
+                        self.query = "select * from system:indexes where name='#primary' and keyspace_id = %s" % bucket.name
+                        attempts = 0
+                        while attempts<6:
+                            res = self.run_cbq_query(self.query)
+                            if res['metrics']['resultCount'] == 0:
+                                break
+                            else:
+                                self.sleep(1)
+                                attempts+=1
+                    except Exception, ex:
+                        self.log.info(str(ex))
+
                 self.query = "select * from system:indexes where name='#primary' and keyspace_id = %s" % bucket.name
                 res = self.run_cbq_query(self.query)
                 if res['metrics']['resultCount'] == 0:
@@ -1240,6 +1298,20 @@ class QueryTests(BaseTestCase):
                     'select * from system:completed_requests where requestId  =  "%s"' % requestId)
                 self.assertTrue(result['metrics']['resultCount'] == 0)
 
+    def debug_query(self, query, expected_result, result, function_name):
+        print("### "+function_name+" #### QUERY ::" + str(query) + "::")
+        print("### "+function_name+" #### EXPECTED RESULT ::" + str(expected_result) + "::")
+        print("### "+function_name+" #### FULL RESULT ::"+str(result)+"::")
+
+    def normalize_result(self, result):
+        if len(result['results'][0]) == 0:
+            return 'missing'
+        return result['results'][0]['$1']
+
+    def null_to_none(self, s):
+        if s.lower() == 'null':
+            return None
+        return s
 
 ##############################################################################################
 #

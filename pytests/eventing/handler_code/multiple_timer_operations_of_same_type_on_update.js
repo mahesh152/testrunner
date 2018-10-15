@@ -1,14 +1,17 @@
 function OnUpdate(doc,meta) {
-    var expiry = Math.round((new Date()).getTime() / 1000) + 5;
-    cronTimer(NDtimerCallback,  expiry, meta.id);
-    cronTimer(NDtimerCallback1,  expiry, meta.id);
+    var expiry = new Date();
+    expiry.setSeconds(expiry.getSeconds() + 5);
+    var context = {docID : meta.id, random_text : "e6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh07Aumoe6cZZGHuh07Aumoe6cZZGHuh07Aumoe6"};
+
+    createTimer(NDtimerCallback,  expiry, meta.id, context);
+    createTimer(NDtimerCallback1,  expiry, meta.id, context);
 }
 
-function NDtimerCallback(docid) {
-    dst_bucket[docid] = 'from NDtimerCallback';
+function NDtimerCallback(context) {
+    dst_bucket[context.docID] = context.random_text;
 }
 
-function NDtimerCallback1(docid) {
+function NDtimerCallback1(context) {
     var query = UPSERT INTO dst_bucket1 ( KEY, VALUE ) VALUES ( UUID() ,'NDtimerCallback1');
 //    query.execQuery();
 }

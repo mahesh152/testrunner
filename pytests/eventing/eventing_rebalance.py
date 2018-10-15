@@ -14,18 +14,25 @@ log = logging.getLogger()
 class EventingRebalance(EventingBaseTest):
     def setUp(self):
         super(EventingRebalance, self).setUp()
+        self.rest.set_service_memoryQuota(service='memoryQuota', memoryQuota=700)
         if self.create_functions_buckets:
+            self.replicas = self.input.param("replicas", 0)
             self.bucket_size = 100
+            # This is needed as we have increased the context size to 93KB. If this is not increased the metadata
+            # bucket goes into heavy DGM
+            self.metadata_bucket_size = 400
             log.info(self.bucket_size)
             bucket_params = self._create_bucket_params(server=self.server, size=self.bucket_size,
-                                                       replicas=self.num_replicas)
+                                                       replicas=self.replicas)
+            bucket_params_meta = self._create_bucket_params(server=self.server, size=self.metadata_bucket_size,
+                                                       replicas=self.replicas)
             self.cluster.create_standard_bucket(name=self.src_bucket_name, port=STANDARD_BUCKET_PORT + 1,
                                                 bucket_params=bucket_params)
             self.src_bucket = RestConnection(self.master).get_buckets()
             self.cluster.create_standard_bucket(name=self.dst_bucket_name, port=STANDARD_BUCKET_PORT + 1,
                                                 bucket_params=bucket_params)
             self.cluster.create_standard_bucket(name=self.metadata_bucket_name, port=STANDARD_BUCKET_PORT + 1,
-                                                bucket_params=bucket_params)
+                                                bucket_params=bucket_params_meta)
             self.buckets = RestConnection(self.master).get_buckets()
         self.gens_load = self.generate_docs(self.docs_per_day)
         self.expiry = 3
@@ -51,6 +58,21 @@ class EventingRebalance(EventingBaseTest):
                                           )
             self.n1ql_helper.create_primary_index(using_gsi=True, server=self.n1ql_node)
             self.handler_code = HANDLER_CODE.N1QL_OPS_WITH_TIMERS
+        elif handler_code == 'n1ql_op_without_timers':
+            # index is required for delete operation through n1ql
+            self.n1ql_node = self.get_nodes_from_services_map(service_type="n1ql")
+            self.n1ql_helper = N1QLHelper(shell=self.shell,
+                                          max_verify=self.max_verify,
+                                          buckets=self.buckets,
+                                          item_flag=self.item_flag,
+                                          n1ql_port=self.n1ql_port,
+                                          full_docs_list=self.full_docs_list,
+                                          log=self.log, input=self.input,
+                                          master=self.master,
+                                          use_rest=True
+                                          )
+            self.n1ql_helper.create_primary_index(using_gsi=True, server=self.n1ql_node)
+            self.handler_code = HANDLER_CODE.N1QL_OPS_WITHOUT_TIMERS
         else:
             self.handler_code = HANDLER_CODE.DELETE_BUCKET_OP_ON_DELETE
         force_disable_new_orchestration = self.input.param('force_disable_new_orchestration', False)
@@ -68,11 +90,11 @@ class EventingRebalance(EventingBaseTest):
         except:
             # This is just a stats API. Ignore the exceptions.
             pass
-        try:
-            self.cleanup_eventing()
-        except:
-            # This is just a cleanup API. Ignore the exceptions.
-            pass
+        # try:
+        #     self.cleanup_eventing()
+        # except:
+        #     # This is just a cleanup API. Ignore the exceptions.
+        #     pass
         super(EventingRebalance, self).tearDown()
 
     def test_eventing_rebalance_in_when_existing_eventing_node_is_processing_mutations(self):
@@ -370,6 +392,7 @@ class EventingRebalance(EventingBaseTest):
             self.fail("rebalance failed with  error : {0}".format(str(ex)))
         finally:
             remote.start_server()
+            self.sleep(40, "Wait for server to start")
         # Wait for eventing to catch up with all the delete mutations and verify results
         # This is required to ensure eventing works after rebalance goes through successfully
         stats_src = RestConnection(self.master).get_bucket_stats(bucket=self.src_bucket_name)
@@ -416,6 +439,7 @@ class EventingRebalance(EventingBaseTest):
         # do a recovery and rebalance
         self.rest.set_recovery_type('ns_1@' + kv_server.ip, recovery_type)
         self.rest.add_back_node('ns_1@' + kv_server.ip)
+        self.sleep(30)
         task.result()
         rebalance = self.cluster.rebalance(self.servers[:self.nodes_init], [], [])
         if rebalance:
@@ -537,6 +561,7 @@ class EventingRebalance(EventingBaseTest):
             # Wait for eventing to catch up with all the delete mutations and verify results
             # This is required to ensure eventing works after rebalance goes through successfully
             self.verify_eventing_results(self.function_name, 0, skip_stats_validation=True)
+        self.refresh_rest_server()
         self.undeploy_and_delete_function(body)
 
     def test_stop_start_kv_rebalance_which_has_eventing_nodes(self):
@@ -594,7 +619,7 @@ class EventingRebalance(EventingBaseTest):
         # load data
         task = self.cluster.async_load_gen_docs(self.master, self.src_bucket_name, self.gens_load,
                                                 self.buckets[0].kvs[1], 'create', compression=self.sdk_compression)
-        # rebalance in a eventing node when eventing is processing mutations
+        # rebalance in a eventing nodes when eventing is processing mutations
         services_in = ["eventing", "eventing"]
         to_add_nodes = self.servers[self.nodes_init:self.nodes_init + 2]
         rebalance = self.cluster.async_rebalance(self.servers[:self.nodes_init], to_add_nodes, [], services=services_in)
@@ -634,6 +659,61 @@ class EventingRebalance(EventingBaseTest):
         self.assertTrue(reached, "rebalance failed, stuck or did not complete")
         rebalance.result()
         task2.result()
+        # Wait for eventing to catch up with all the update mutations and verify results after rebalance
+        self.verify_eventing_results(self.function_name, self.docs_per_day * 2016, skip_stats_validation=True)
+        self.undeploy_and_delete_function(body)
+
+    # Adding this test to validate MB-30394
+    def test_eventing_rebalance_with_multiple_kv_nodes(self):
+        gen_load_del = copy.deepcopy(self.gens_load)
+        gen_load_create = copy.deepcopy(self.gens_load)
+        sock_batch_size = self.input.param('sock_batch_size', 1)
+        worker_count = self.input.param('worker_count', 3)
+        cpp_worker_thread_count = self.input.param('cpp_worker_thread_count', 1)
+        body = self.create_save_function_body(self.function_name, self.handler_code,
+                                              sock_batch_size=sock_batch_size, worker_count=worker_count,
+                                              cpp_worker_thread_count=cpp_worker_thread_count)
+        self.deploy_function(body)
+        # load data
+        task = self.cluster.async_load_gen_docs(self.master, self.src_bucket_name, self.gens_load,
+                                                self.buckets[0].kvs[1], 'create', compression=self.sdk_compression)
+        # rebalance in a multiple 2 kv nodes when eventing is processing mutations
+        services_in = ["kv", "kv"]
+        to_add_nodes = self.servers[self.nodes_init:self.nodes_init + 2]
+        rebalance = self.cluster.async_rebalance(self.servers[:self.nodes_init], to_add_nodes, [],
+                                                 services=services_in)
+        reached = RestHelper(self.rest).rebalance_reached()
+        self.assertTrue(reached, "rebalance failed, stuck or did not complete")
+        rebalance.result()
+        task.result()
+        # Wait for eventing to catch up with all the update mutations and verify results after rebalance
+        self.verify_eventing_results(self.function_name, self.docs_per_day * 2016, skip_stats_validation=True)
+        # delete json documents
+        task1 = self.cluster.async_load_gen_docs(self.master, self.src_bucket_name, gen_load_del,
+                                                 self.buckets[0].kvs[1], 'delete', compression=self.sdk_compression)
+        to_remove_nodes = to_add_nodes
+        rebalance1 = self.cluster.async_rebalance(self.servers[:self.nodes_init + 2], [], to_remove_nodes)
+        reached1 = RestHelper(self.rest).rebalance_reached()
+        self.assertTrue(reached1, "rebalance failed, stuck or did not complete")
+        rebalance1.result()
+        task1.result()
+        # Wait for eventing to catch up with all the delete mutations and verify results
+        # This is required to ensure eventing works after rebalance goes through successfully
+        self.verify_eventing_results(self.function_name, 0, skip_stats_validation=True)
+        all_kv_nodes = self.get_nodes_from_services_map(service_type="kv", get_all_nodes=True)
+        # add the previously removed nodes as part of swap rebalance
+        for node in to_add_nodes:
+            self.rest.add_node(self.master.rest_username, self.master.rest_password, node.ip, node.port,
+                               services=["kv"])
+        # load data
+        task2 = self.cluster.async_load_gen_docs(self.master, self.src_bucket_name, gen_load_create,
+                                                 self.buckets[0].kvs[1], 'create', compression=self.sdk_compression)
+        rebalance = self.cluster.async_rebalance(self.servers[:self.nodes_init], [], all_kv_nodes[1:3])
+        reached = RestHelper(self.rest).rebalance_reached()
+        self.assertTrue(reached, "rebalance failed, stuck or did not complete")
+        rebalance.result()
+        task2.result()
+        self.master = all_kv_nodes[0]
         # Wait for eventing to catch up with all the update mutations and verify results after rebalance
         self.verify_eventing_results(self.function_name, self.docs_per_day * 2016, skip_stats_validation=True)
         self.undeploy_and_delete_function(body)
@@ -1019,6 +1099,19 @@ class EventingRebalance(EventingBaseTest):
             self.handler_code = HANDLER_CODE.BUCKET_OP_WITH_RAND
         else:
             self.handler_code = HANDLER_CODE.BUCKET_OP_WITH_RAND
+        # index is required for delete operation through n1ql
+        self.n1ql_node = self.get_nodes_from_services_map(service_type="n1ql")
+        self.n1ql_helper = N1QLHelper(shell=self.shell,
+                                      max_verify=self.max_verify,
+                                      buckets=self.buckets,
+                                      item_flag=self.item_flag,
+                                      n1ql_port=self.n1ql_port,
+                                      full_docs_list=self.full_docs_list,
+                                      log=self.log, input=self.input,
+                                      master=self.master,
+                                      use_rest=True
+                                      )
+        self.n1ql_helper.create_primary_index(using_gsi=True, server=self.n1ql_node)
         body_array = []
         # deploy multiple functions
         for i in range(self.num_functions):
@@ -1040,9 +1133,45 @@ class EventingRebalance(EventingBaseTest):
         task.result()
         # This needs to be skipped in case of doc timers as multiple doc timers can't process same doc
         if not self.skip_validation:
-            # Wait for eventing to catch up with all the update mutations and verify results after rebalance
-            self.verify_eventing_results(self.function_name, self.docs_per_day * 2016 * self.num_functions,
-                                         skip_stats_validation=True)
+            try:
+                # Wait for eventing to catch up with all the update mutations and verify results after rebalance
+                self.verify_eventing_results(self.function_name, self.docs_per_day * 2016 * self.num_functions,
+                                             skip_stats_validation=True, timeout=1200)
+            except Exception as ex:
+                log.info(str(ex))
+                stats_map = self.get_index_stats(perNode=False)
+                item_count_dst_bucket = stats_map[self.dst_bucket_name]["#primary"]["items_count"]
+                log.info("Destination item count : {0}\n\n".format(item_count_dst_bucket))
+                # See MB-30764, Hence adding these queries
+                n1ql_query1 = "select meta().id, * from metadata where \
+                                meta().id not like 'eventing::%::vb::%' and \
+                                meta().id not like 'eventing::%:rt:%' and \
+                                meta().id not like 'eventing::%:sp'"
+                result1 = self.n1ql_helper.run_cbq_query(query=n1ql_query1, server=self.n1ql_node)
+                log.info("\n RESULTS for query {1} : count : {2} \n\n{0} \n\n".format(json.dumps(result1["results"],
+                                                                                                sort_keys=True,
+                                                                                                indent=4),
+                                                                                      n1ql_query1,
+                                                                                      len(result1["results"])))
+                n1ql_query2 = "select meta().id, * from metadata where \
+                                meta().id like 'eventing::%:sp'\
+                                and sta != stp"
+                result2 = self.n1ql_helper.run_cbq_query(query=n1ql_query2, server=self.n1ql_node)
+                log.info("\n RESULTS for query {1} : count : {2} \n\n{0} \n\n".format(json.dumps(result2["results"],
+                                                                                                sort_keys=True,
+                                                                                                indent=4),
+                                                                                      n1ql_query2,
+                                                                                      len(result2["results"])))
+                n1ql_query3 = "select meta().id, * from metadata where\
+                                meta().id like 'eventing::%:rt:%'"
+                result3 = self.n1ql_helper.run_cbq_query(query=n1ql_query3, server=self.n1ql_node)
+                log.info("\n RESULTS for query {1} : count : {2} \n\n{0} \n\n".format(json.dumps(result3["results"],
+                                                                                                sort_keys=True,
+                                                                                                indent=4),
+                                                                                      n1ql_query3,
+                                                                                      len(result3["results"])))
+                if item_count_dst_bucket != self.docs_per_day * 2016 * self.num_functions:
+                    raise
         else:
             self.sleep(300)
             eventing_nodes = self.get_nodes_from_services_map(service_type="eventing", get_all_nodes=True)
@@ -1058,3 +1187,14 @@ class EventingRebalance(EventingBaseTest):
                 self.undeploy_and_delete_function(body)
         except:
             pass
+        try:
+            stats_map = self.get_index_stats(perNode=False)
+            item_count_metadata = stats_map[self.metadata_bucket_name]["#primary"]["items_count"]
+            log.info("No of items in metadata bucket after undeploy/delete of all the functions : {0}".
+                     format(item_count_metadata))
+            if item_count_metadata != 0:
+                log.warn("metadata bucket still has some documents after undeploying the function : {0} docs are "
+                         "remaining".format(item_count_metadata))
+        except:
+            pass
+

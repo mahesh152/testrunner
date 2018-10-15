@@ -7,7 +7,7 @@ from random import randint
 from datetime import datetime
 
 
-class QueryHelper(object):
+class RQGQueryHelper(object):
     def _find_hints(self, n1ql_query):
         map = self._divide_sql(n1ql_query)
         select_from = map["select_from"]
@@ -127,6 +127,15 @@ class QueryHelper(object):
                 }
 
         return map
+
+    def extract_select_clause(self, sql):
+        select_text = self._find_string_type(sql, ["SELECT", "Select", "select"])
+        from_text = self._find_string_type(sql, ["FROM", "from", "From"])
+        if "SUBTABLE" in sql:
+            select_from_text = sql.split(' ')[1]+' ' + sql.split(' ')[2]
+        else:
+            select_from_text = sql.split(select_text)[1].split(from_text)[0].strip()
+        return select_from_text
 
     def _gen_query_with_subqueryenhancement(self, sql="", table_map={}, count1=0):
         outer_table_map = {}
@@ -450,6 +459,11 @@ class QueryHelper(object):
 
     def _gen_select_tables_info(self, sql="", table_map={}, ansi_joins=False):
         table_name_list = table_map.keys()
+        # For ansi_joins there is an edge case where there is only 1 table name available to select and
+        # this creates a join of a table against itself, very expensive and not useful at all
+        if ansi_joins:
+            persistent_table_name_list = ['simple_table_1','simple_table_2','simple_table_3','simple_table_4',
+                                          'simple_table_10']
         prev_table_list = []
         standard_tokens = ["INNER JOIN", "LEFT JOIN"]
         new_sub_query = ""
@@ -466,6 +480,7 @@ class QueryHelper(object):
                 bucket_string = table_name+"  "+table_name_alias
             return sql.replace("BUCKET_NAME", bucket_string), {table_name: table_map[table_name]}
         for token in sql_token_list:
+            use_table_entry = False
             if token.strip() not in standard_tokens:
                 choice_list = list(set(table_name_list) - set(prev_table_list))
                 if len(choice_list) > 0:
@@ -474,6 +489,16 @@ class QueryHelper(object):
                 else:
                     table_name = table_name_list[0]
                     table_name_alias = table_map[table_name]["alias_name"]+self._random_alphabet_string()
+                    # If there is only one table this will cause a join to use the same table on the left and right, we
+                    # want to avoid this at all costs 
+                    if ansi_joins:
+                        join_list = re.split('INNER JOIN|LEFT JOIN', new_sub_query)
+                        join_bucket = join_list[0].strip().split(" ")[0]
+                        if table_name == join_bucket:
+                            new_table_name_list =list(set(persistent_table_name_list) - set([table_name]))
+                            table_name = random.choice(new_table_name_list)
+                            table_name_alias = table_map[table_name_list[0]]["alias_name"]+self._random_alphabet_string()
+                            use_table_entry = True
                 data = token
                 data = data.replace("BUCKET_NAME", (table_name+" "+table_name_alias))
                 if "ALIAS" in token:
@@ -481,7 +506,10 @@ class QueryHelper(object):
                     rewrite_table_name_alias = True
                 if "PREVIOUS_TABLE" in token:
                     previous_table_name = random.choice(prev_table_list)
-                    previous_table_name_alias = table_map[previous_table_name]["alias_name"]
+                    if use_table_entry:
+                        previous_table_name_alias = table_map[table_name_list[0]]["alias_name"]
+                    else:
+                        previous_table_name_alias = table_map[previous_table_name]["alias_name"]
                     if "BOOL_FIELD" in token:
                         field_name, values = self._search_field(["tinyint"], table_map)
                         table_field = field_name.split(".")[1]
@@ -511,8 +539,16 @@ class QueryHelper(object):
                                                 ("query" + "." + table_field)) + " "
                         data = data.replace("CURRENT_TABLE.NUMERIC_FIELD", (table_name_alias + "." + table_field)) + " "
                         data = data.replace("PREVIOUS_TABLE.NUMERIC_FIELD", (previous_table_name_alias+"." + table_field))
-                    data = data.replace("PREVIOUS_TABLE.FIELD", (previous_table_name_alias+"."+table_map[previous_table_name]["primary_key_field"]))
-                    data = data.replace("CURRENT_TABLE.FIELD", (table_name_alias+"."+table_map[table_name]["primary_key_field"]))
+                    if use_table_entry:
+                        data = data.replace("PREVIOUS_TABLE.FIELD", (
+                                previous_table_name_alias + "." + "primary_key_id"))
+
+                        data = data.replace("CURRENT_TABLE.FIELD",
+                                            (table_name_alias + "." + table_map[table_name_list[0]]["primary_key_field"]))
+                    else:
+                        data = data.replace("PREVIOUS_TABLE.FIELD", (
+                                previous_table_name_alias + "." + table_map[previous_table_name]["primary_key_field"]))
+                        data = data.replace("CURRENT_TABLE.FIELD", (table_name_alias+"."+table_map[table_name]["primary_key_field"]))
                     rewrite_table_name_alias = False
 
                 if "CURRENT_TABLE" in token:
@@ -704,8 +740,15 @@ class QueryHelper(object):
         if select_from:
             new_sql += select_from + " FROM "
         if from_fields:
-            new_sql += from_fields + " "
-            new_sql += index_hint + " "
+            if " LET " in from_fields:
+                actual_from_fields = from_fields.split(" LET ")[0]
+                let_fields = " LET " + from_fields.split(" LET ")[1]
+                new_sql += actual_from_fields + " "
+                new_sql += index_hint + " "
+                new_sql += let_fields + " "
+            else:
+                new_sql += from_fields + " "
+                new_sql += index_hint + " "
         if where_condition:
             new_sql += " WHERE " + where_condition + " "
         if group_by:
@@ -735,9 +778,10 @@ class QueryHelper(object):
         return new_sql
 
     def _check_function(self, sql):
-        func_list = ["MIN", "min", "MAX", "max", "COUNT", "SUM", "sum", "AVG", "avg"]
+        func_list = ["min", "max", "count", "sum", "avg", "stddev", "variance", "stddev_samp", "stddev_pop",
+                     "variance_pop", "variance_samp", "mean", "var_pop", "var_samp"]
         for func in func_list:
-            if func in sql:
+            if func in sql.lower():
                 return True
         return False
 
@@ -1226,14 +1270,141 @@ class QueryHelper(object):
         return temp_sql
 
     def aggregate_special_convert(self, map):
-        map["n1ql"] = map["n1ql"].replace("?", ",").replace("&", ",")
+        map["n1ql"] = map["n1ql"].replace("?", ",").replace("&", ",").replace(" COMMA ", " , ")
         map["n1ql"] = map["n1ql"].replace("SUBSTR", "SUBSTR1")
+        map["sql"] = map["sql"].replace(" COMMA ", " , ")
         map["sql"] = self.convert_sql_position_func(str(map["sql"]))
         map["sql"] = self.convert_sql_datetime_func(str(map["sql"]))
         map["sql"] = self.convert_sql_log_func(str(map["sql"]))
         return map
 
-    def _convert_sql_template_to_value_for_secondary_indexes(self, n1ql_template="", table_map={}, table_name="simple_table", define_gsi_index=False, ansi_joins=False, aggregate_pushdown=False, partitioned_indexes=False):
+    def _add_let_and_letting_statements(self, sql_map, table_map):
+        select_from = sql_map['select_from']
+        from_fields = sql_map["from_fields"]
+        where_condition = sql_map['where_condition']
+        group_by = sql_map['group_by']
+        order_by = sql_map["order_by"]
+        having = sql_map["having"]
+
+        all_field_names, string_field_names, numeric_field_names, datetime_field_names, bool_field_names = self.get_all_field_names(table_map)
+
+        query_fields_let = []
+        valid_clauses = []
+        select_from_fields = self.extract_field_names(select_from, all_field_names)
+        query_fields_let += select_from_fields
+        valid_clauses += [select_from]
+        if where_condition:
+            where_condition_fields = self.extract_field_names(where_condition, all_field_names)
+            query_fields_let += where_condition_fields
+            valid_clauses += [where_condition]
+        if group_by:
+            groupby_fields = self.extract_field_names(group_by, all_field_names)
+            query_fields_let += groupby_fields
+            valid_clauses += [group_by]
+
+        query_fields_let = list(set(query_fields_let))
+
+        let_map = self._create_let_map(query_fields_let)
+        let_statement = self._create_let_statement(let_map)
+
+        new_sql = "SELECT "
+        if select_from:
+            for field in let_map.keys():
+                let_var_name = let_map[field]
+                select_from = select_from.replace(field, let_var_name)
+            new_sql += select_from + " FROM "
+        if from_fields:
+            new_sql += from_fields + " "
+        if let_statement:
+            new_sql += " " + let_statement
+        if where_condition:
+            for field in let_map.keys():
+                let_var_name = let_map[field]
+                where_condition = where_condition.replace(field, let_var_name)
+            new_sql += " WHERE " + where_condition + " "
+        if group_by:
+            for field in let_map.keys():
+                let_var_name = let_map[field]
+                group_by = group_by.replace(field, let_var_name)
+            new_sql += " GROUP BY " + group_by +" "
+
+            group_fields = group_by.split(",")
+            group_fields = [field.strip() for field in group_fields]
+            letting_map = self._create_letting_map(group_fields)
+            letting_statement = self._create_letting_statement(letting_map)
+            new_sql += " " + letting_statement
+
+            if having or order_by:
+                letting_map = self._update_letting_map_with_let_vars(letting_map, let_map)
+                for field in letting_map.keys():
+                    letting_var_name = letting_map[field]
+                    if having:
+                        having = having.replace(field, letting_var_name)
+                    if order_by:
+                        order_by = order_by.replace(field, letting_var_name)
+
+        if order_by:
+            new_sql += " ORDER BY " + order_by +" "
+        if having:
+            new_sql += " HAVING " + having +" "
+        return new_sql
+
+    def _update_letting_map_with_let_vars(self, letting_map, let_map):
+        for letting_field in letting_map.keys():
+            for let_field in let_map.keys():
+                if letting_field == let_map[let_field]:
+                    letting_map[let_field] = letting_map.pop(letting_field)
+        return letting_map
+
+    def _add_alias_to_select_fields(self, sql):
+        select_clause = self.extract_select_clause(sql)
+        rest_of_sql = sql.split("FROM")[1]
+        select_fields = [field.split("AS ")[0] for field in select_clause.split(",")]
+        num_fields = len(select_fields)
+        new_select_clause = "SELECT"
+        alias = "z"
+        for i in range(0, num_fields):
+            new_select_clause += " " + select_fields[i] + " as " + alias + ","
+            alias += "z"
+
+        new_select_clause = new_select_clause[:-1] + " "
+        return new_select_clause + "FROM " + rest_of_sql
+
+    def _create_let_map(self, fields):
+        let_map = dict()
+        index = 1
+        for field in fields:
+            let_map[field] = "let_var_"+str(index)
+            index += 1
+        return let_map
+
+    def _create_letting_map(self, fields):
+        letting_map = dict()
+        index = 1
+        for field in fields:
+            letting_map[field] = "letting_var_"+str(index)
+            index += 1
+        return letting_map
+
+    def _create_let_statement(self, let_map):
+        let_stm = "LET "
+        for field in let_map.keys():
+            var_name = let_map[field]
+            let_stm += var_name+"="+field+","
+        let_stm = let_stm[:-1]
+        let_stm += " "
+        return let_stm
+
+    def _create_letting_statement(self, letting_map):
+        letting_stm = "LETTING "
+        for field in letting_map.keys():
+            var_name = letting_map[field]
+            letting_stm += var_name+"="+field+","
+        letting_stm = letting_stm[:-1]
+        letting_stm += " "
+        return letting_stm
+
+    def _convert_sql_template_to_value_for_secondary_indexes(self, n1ql_template="", table_map={}, table_name="simple_table", define_gsi_index=False, ansi_joins=False, aggregate_pushdown=False, partitioned_indexes=False, with_let=False):
         index_name_with_occur_fields_where = None
         index_name_with_expression = None
         index_name_fields_only = None
@@ -1242,19 +1413,29 @@ class QueryHelper(object):
         n1ql = self._gen_sql_to_nql(sql, ansi_joins)
         sql = self._convert_condition_template_to_value_datetime(sql, table_map, sql_type="sql")
         n1ql = self._convert_condition_template_to_value_datetime(n1ql, table_map, sql_type="n1ql")
+        sql_map = self._divide_sql(n1ql)
+
         if "IS MISSING" in sql:
             sql = sql.replace("IS MISSING", "IS NULL")
+
+        if with_let:
+            n1ql_map = self._divide_sql(n1ql)
+            n1ql = self._add_let_and_letting_statements(n1ql_map, table_map)
+            n1ql = self._add_alias_to_select_fields(n1ql)
+            sql = self._add_alias_to_select_fields(sql)
+
         map = { "n1ql": n1ql,
                 "sql": sql,
                 "bucket": str(",".join(table_map.keys())),
                 "expected_result": None,
                 "indexes": {} }
+
         if not define_gsi_index:
             if aggregate_pushdown == "primary":
                 map["n1ql"] = map["n1ql"].replace("primary_key_id", "meta().id ")
                 map = self.aggregate_special_convert(map)
             return map
-        sql_map = self._divide_sql(n1ql)
+
         where_condition = sql_map["where_condition"]
         select_from = sql_map["select_from"]
         from_fields = sql_map["from_fields"]
@@ -1576,13 +1757,17 @@ class QueryHelper(object):
                     present_fields.append(field)
         return list(set(present_fields))
 
-    def _covert_fields_template_to_random_value(self, field_key, sql_map, table_map={}):
-        sql = sql_map[field_key]
+    def get_all_field_names(self, table_map):
         string_field_names = self._search_fields_of_given_type(["varchar", "text", "tinytext", "char"], table_map)
         numeric_field_names = self._search_fields_of_given_type(["int", "mediumint", "double", "float", "decimal"], table_map)
         datetime_field_names = self._search_fields_of_given_type(["datetime"], table_map)
         bool_field_names = self._search_fields_of_given_type(["tinyint"], table_map)
         all_field_names = string_field_names + numeric_field_names + datetime_field_names + bool_field_names
+        return all_field_names, string_field_names, numeric_field_names, datetime_field_names, bool_field_names
+
+    def _covert_fields_template_to_random_value(self, field_key, sql_map, table_map={}):
+        sql = sql_map[field_key]
+        all_field_names, string_field_names, numeric_field_names, datetime_field_names, bool_field_names = self.get_all_field_names(table_map)
         new_sql = sql
         if "PRIMARY_KEY_VAL" in sql:
             new_sql = new_sql.replace("PRIMARY_KEY_VAL", "primary_key_id ")
@@ -1708,8 +1893,8 @@ class QueryHelper(object):
                     elif "LIST" in token:
                         string_check = False
                         add_token = False
-                        max = 5
-                        if len(values) < 5:
+                        max = 20
+                        if len(values) < 20:
                             max = len(values)
                         list = self._convert_list(values[0:max], type="string")
                         new_sql += token.replace("LIST", list)+space
@@ -1739,8 +1924,8 @@ class QueryHelper(object):
                     elif "LIST" in token:
                         numeric_check = False
                         add_token = False
-                        max = 5
-                        if len(values) < 5:
+                        max = 20
+                        if len(values) < 20:
                             max = len(values)
                         list = self._convert_list(values[0:max], type="numeric")
                         new_sql += token.replace("LIST", list)+space
@@ -1766,8 +1951,8 @@ class QueryHelper(object):
                     elif "LIST" in token:
                         datetime_check = False
                         add_token = False
-                        max = 5
-                        if len(values) < 5:
+                        max = 20
+                        if len(values) < 20:
                             max = len(values)
                         list = self._convert_list(values[0:max], type="datetime")
                         new_sql += token.replace("LIST",list)+space
@@ -1826,8 +2011,8 @@ class QueryHelper(object):
                     elif "LIST" in token:
                         string_check = False
                         add_token = False
-                        max = 5
-                        if len(values) < 5:
+                        max = 20
+                        if len(values) < 20:
                             max = len(values)
                         list = self._convert_list(values[0:max], type="string")
                         new_sql += token.replace("LIST", list)+space
@@ -1857,8 +2042,8 @@ class QueryHelper(object):
                     elif "LIST" in token:
                         numeric_check = False
                         add_token = False
-                        max = 5
-                        if len(values) < 5:
+                        max = 20
+                        if len(values) < 20:
                             max = len(values)
                         list = self._convert_list(values[0:max], type="numeric")
                         new_sql += token.replace("LIST", list)+space
@@ -1884,8 +2069,8 @@ class QueryHelper(object):
                     elif "LIST" in token:
                         datetime_check = False
                         add_token = False
-                        max = 5
-                        if len(values) < 5:
+                        max = 20
+                        if len(values) < 20:
                             max = len(values)
                         list = self._convert_list(values[0:max], type="datetime")
                         new_sql += token.replace("LIST", list)+space
@@ -1938,8 +2123,8 @@ class QueryHelper(object):
                     elif "DATETIME_LIST" in token:
                         datetime_check = False
                         add_token = False
-                        max = 5
-                        if len(values) < 5:
+                        max = 20
+                        if len(values) < 20:
                             max = len(values)
                         list = self._convert_list(values[0:max], type="datetime")
                         new_list = self._convert_list_datetime(values[0:max], function_list)

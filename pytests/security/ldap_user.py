@@ -41,6 +41,7 @@ class LdapUser(UserBase):
             shell.log_command_output(o, r)
         finally:
             shell.disconnect()
+            return o
 
 
     def delete_user(self):

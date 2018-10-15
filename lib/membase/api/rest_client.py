@@ -1627,6 +1627,7 @@ class RestConnection(object):
         status, content, header = self._http_request(api, 'POST', post)
         if not status:
             log.error('unable to logClientError')
+        return status,content,header
 
     def trigger_index_compaction(self, timeout=120):
         node = None
@@ -4249,6 +4250,20 @@ class RestConnection(object):
         return json.loads(content)
 
     '''
+            Ensure that the eventing node is out of bootstrap node
+    '''
+
+    def get_running_eventing_apps(self):
+        authorization = base64.encodestring('%s:%s' % (self.username, self.password))
+        url = "getRunningApps"
+        api = self.eventing_baseUrl + url
+        headers = {'Content-type': 'application/json', 'Authorization': 'Basic %s' % authorization}
+        status, content, header = self._http_request(api, 'GET', headers=headers)
+        if not status:
+            raise Exception(content)
+        return json.loads(content)
+
+    '''
              Get Eventing processing stats
     '''
     def get_event_processing_stats(self, name, eventing_map=None):
@@ -4364,6 +4379,35 @@ class RestConnection(object):
         return content
 
     '''
+               enable debugger
+    '''
+    def enable_eventing_debugger(self):
+        authorization = base64.encodestring('%s:%s' % (self.username, self.password))
+        url = "_p/event/api/v1/config"
+        api = self.baseUrl + url
+        headers = {'Content-type': 'application/json', 'Authorization': 'Basic %s' % authorization}
+        body="{\"enable_debugger\": true}"
+        status, content, header = self._http_request(api, 'POST', headers=headers,params=body)
+        if not status:
+            raise Exception(content)
+        return content
+
+    '''
+                   disable debugger
+    '''
+
+    def disable_eventing_debugger(self):
+        authorization = base64.encodestring('%s:%s' % (self.username, self.password))
+        url = "_p/event/api/v1/config"
+        api = self.baseUrl + url
+        headers = {'Content-type': 'application/json', 'Authorization': 'Basic %s' % authorization}
+        body = "{\"enable_debugger\": false}"
+        status, content, header = self._http_request(api, 'POST', headers=headers, params=body)
+        if not status:
+            raise Exception(content)
+        return content
+
+    '''
             Start debugger
     '''
     def start_eventing_debugger(self, name):
@@ -4422,6 +4466,31 @@ class RestConnection(object):
         if not status:
             raise Exception(content)
         return content
+
+    def set_eventing_retry(self, name, body):
+        authorization = base64.encodestring('%s:%s' % (self.username, self.password))
+        url = "api/v1/functions/" + name + "/retry"
+        api = self.eventing_baseUrl + url
+        headers = {'Content-type': 'application/json', 'Authorization': 'Basic %s' % authorization}
+        status, content, header = self._http_request(api, 'POST', headers=headers,
+                                                     params=json.dumps(body).encode("ascii", "ignore"))
+        if not status:
+            raise Exception(content)
+        return content
+
+    def get_user(self, user_id):
+        url = "settings/rbac/users/"
+        api = self.baseUrl + url
+        status, content, header = self._http_request(api, "GET")
+
+        if content != None:
+            content_json = json.loads(content)
+
+        for i in range(len(content_json)):
+            user = content_json[i]
+            if user.get('id') == user_id:
+                return user
+        return {}
 
 
 class MembaseServerVersion:

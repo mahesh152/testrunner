@@ -143,7 +143,7 @@ class EventingN1QL(EventingBaseTest):
         self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
                   batch_size=self.batch_size)
         body = self.create_save_function_body(self.function_name,HANDLER_CODE.ANONYMOUS,dcp_stream_boundary="from_now"
-                                              ,execution_timeout=5)
+                                              )
         self.deploy_function(body)
         #create a mutation via N1QL
         self.n1ql_helper.create_primary_index(using_gsi=True, server=self.n1ql_node)
@@ -157,7 +157,7 @@ class EventingN1QL(EventingBaseTest):
         self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
                   batch_size=self.batch_size)
         body = self.create_save_function_body(self.function_name, HANDLER_CODE.RECURSION_FUNCTION,
-                                              dcp_stream_boundary="from_now",execution_timeout=5)
+                                              dcp_stream_boundary="from_now")
         self.deploy_function(body)
         # create a mutation via N1QL
         self.n1ql_helper.create_primary_index(using_gsi=True, server=self.n1ql_node)
@@ -178,22 +178,24 @@ class EventingN1QL(EventingBaseTest):
             if "Only function declaration are allowed in global scope" not in str(e):
                 self.fail("Deployment is expected to be failed but no message of failure")
 
-
-
     def test_empty_handler(self):
         self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
                   batch_size=self.batch_size)
         body = self.create_save_function_body(self.function_name, HANDLER_CODE_ERROR.EMPTY,
                                               dcp_stream_boundary="from_now")
-        self.deploy_function(body,deployment_fail=True)
-        # TODO : more assertion needs to be validate after MB-27126
+        try:
+            self.deploy_function(body,deployment_fail=True)
+        except Exception as e:
+            if "Function handler should not be empty" not in str(e):
+                self.fail("Function deployment succeeded with empty handler")
 
     def test_without_update_delete(self):
         self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
                   batch_size=self.batch_size)
         body = self.create_save_function_body(self.function_name, HANDLER_CODE_ERROR.RANDOM,
                                               dcp_stream_boundary="from_now")
-        self.deploy_function(body, deployment_fail=True)
+        # MB-27126
+        self.deploy_function(body, deployment_fail=False)
         # TODO : more assertion needs to be validate after MB-27126
 
     def test_anonymous_with_cron_timer(self):

@@ -106,7 +106,7 @@ class EventingNegative(EventingBaseTest):
             if "ERR_SOURCE_BUCKET_MEMCACHED" not in str(ex):
                 self.fail("Eventing function allowed both source and metadata bucket to be memcached buckets")
 
-    def test_src_metadata_and_dst_bucket_flush_and_delete_when_eventing_is_processing_mutations(self):
+    def test_src_metadata_and_dst_bucket_flush_when_eventing_is_processing_mutations(self):
         body = self.create_save_function_body(self.function_name, HANDLER_CODE.BUCKET_OPS_WITH_DOC_TIMER)
         self.deploy_function(body)
         self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
@@ -114,10 +114,70 @@ class EventingNegative(EventingBaseTest):
         # flush source, metadata and destination buckets when eventing is processing_mutations
         for bucket in self.buckets:
             self.rest.flush_bucket(bucket.name)
+        # Undeploy and delete the function. In case of flush functions are not undeployed automatically
+        self.undeploy_and_delete_function(body)
+        # check if all the eventing-consumers are cleaned up
+        # Validation of any issues like panic will be taken care by teardown method
+        self.assertTrue(self.check_if_eventing_consumers_are_cleaned_up(),
+                        msg="eventing-consumer processes are not cleaned up even after undeploying the function")
+
+    # See MB-30377
+    def test_src_metadata_and_dst_bucket_delete_when_eventing_is_processing_mutations(self):
+        body = self.create_save_function_body(self.function_name, HANDLER_CODE.BUCKET_OPS_WITH_DOC_TIMER)
+        self.deploy_function(body)
+        self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
+                  batch_size=self.batch_size)
         # delete source, metadata and destination buckets when eventing is processing_mutations
         for bucket in self.buckets:
+                self.log.info("deleting bucket: %s",bucket.name)
                 self.rest.delete_bucket(bucket.name)
-        self.undeploy_and_delete_function(body)
+        # Wait for function to get undeployed automatically
+        self.wait_for_undeployment(body['appname'])
+        # Delete the function
+        self.delete_function(body)
+        self.sleep(60)
+        # check if all the eventing-consumers are cleaned up
+        # Validation of any issues like panic will be taken care by teardown method
+        self.assertTrue(self.check_if_eventing_consumers_are_cleaned_up(),
+                        msg="eventing-consumer processes are not cleaned up even after undeploying the function")
+
+    # MB-30377
+    def test_src_bucket_delete_when_eventing_is_processing_mutations(self):
+        body = self.create_save_function_body(self.function_name, HANDLER_CODE.BUCKET_OPS_WITH_DOC_TIMER)
+        self.deploy_function(body)
+        self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
+                  batch_size=self.batch_size)
+        # delete source, metadata and destination buckets when eventing is processing_mutations
+        for bucket in self.buckets:
+            if bucket.name == "src_bucket":
+                self.log.info("deleting bucket: %s",bucket.name)
+                self.rest.delete_bucket(bucket.name)
+        # Wait for function to get undeployed automatically
+        self.wait_for_undeployment(body['appname'])
+        # Delete the function
+        self.delete_function(body)
+        self.sleep(60)
+        # check if all the eventing-consumers are cleaned up
+        # Validation of any issues like panic will be taken care by teardown method
+        self.assertTrue(self.check_if_eventing_consumers_are_cleaned_up(),
+                        msg="eventing-consumer processes are not cleaned up even after undeploying the function")
+
+    # MB-29533 and MB-31545
+    def test_metadata_bucket_delete_when_eventing_is_processing_mutations(self):
+        body = self.create_save_function_body(self.function_name, HANDLER_CODE.BUCKET_OPS_WITH_DOC_TIMER)
+        self.deploy_function(body)
+        self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
+                  batch_size=self.batch_size)
+        # delete source, metadata and destination buckets when eventing is processing_mutations
+        for bucket in self.buckets:
+            if bucket.name == "metadata":
+                self.log.info("deleting bucket: %s",bucket.name)
+                self.rest.delete_bucket(bucket.name)
+        # Wait for function to get undeployed automatically
+        self.wait_for_undeployment(body['appname'])
+        # Delete the function
+        self.delete_function(body)
+        self.sleep(60)
         # check if all the eventing-consumers are cleaned up
         # Validation of any issues like panic will be taken care by teardown method
         self.assertTrue(self.check_if_eventing_consumers_are_cleaned_up(),
@@ -128,15 +188,15 @@ class EventingNegative(EventingBaseTest):
                   batch_size=self.batch_size)
         body = self.create_save_function_body(self.function_name, HANDLER_CODE.BUCKET_OPS_ON_UPDATE, worker_count=3)
         self.deploy_function(body, wait_for_bootstrap=False)
+        body1 = {"count": 1}
+        # Set retry to 1
+        self.rest.set_eventing_retry(body['appname'], body1)
         try:
             # Try undeploying the function when it is still bootstrapping
             self.undeploy_function(body)
         except Exception as ex:
             if "not bootstrapped. Operation not permitted. Edit function instead" not in str(ex):
                 self.fail("Function undeploy succeeded even when function was in bootstrapping state")
-        # Wait for eventing to catch up with all the create mutations and verify results
-        self.wait_for_bootstrap_to_complete(body['appname'])
-        self.verify_eventing_results(self.function_name, self.docs_per_day * 2016)
         self.undeploy_and_delete_function(body)
 
     def test_function_where_handler_code_takes_more_time_to_execute_than_execution_timeout(self):
@@ -150,7 +210,7 @@ class EventingNegative(EventingBaseTest):
                                    'create', compression=self.sdk_compression)
         # create a function which sleeps for 5 secs and set execution_timeout to 1s
         body = self.create_save_function_body(self.function_name, HANDLER_CODE_ERROR.EXECUTION_TIME_MORE_THAN_TIMEOUT,
-                                              execution_timeout=1)
+                                              execution_timeout=30)
         # deploy the function
         self.deploy_function(body)
         # This is intentionally added so that we wait for some mutations to process and we decide none are processed
@@ -166,7 +226,7 @@ class EventingNegative(EventingBaseTest):
             exec_timeout_count += out[0]["failure_stats"]["timeout_count"]
         # check whether all the function executions timed out and is equal to number of docs created
         if exec_timeout_count != num_docs:
-            self.fail("Not all event executions timed out : Expected : {0} Actual : {1}".format(len(keys),
+            self.fail("Not all event executions timed out : Expected : {0} Actual : {1}".format(num_docs,
                                                                                                 exec_timeout_count))
         self.undeploy_and_delete_function(body)
 
@@ -220,3 +280,25 @@ class EventingNegative(EventingBaseTest):
         except Exception as e:
             if "Function name can only contain characters in range A-Z, a-z, 0-9 and underscore, hyphen" not in str(e):
                 self.fail("Deployment is expected to be failed when space is present in function name")
+
+    def test_deploy_function_invalid_alias_name(self):
+        body = self.create_save_function_body(self.function_name, HANDLER_CODE.BUCKET_OPS_WITH_DOC_TIMER)
+        # Use an invalid alias
+        body['depcfg']['buckets'].append({"alias": "908!@#$%%^&&**", "bucket_name": self.dst_bucket_name})
+        try:
+            self.deploy_function(body, deployment_fail=True)
+        except Exception as e:
+            if "ERR_INVALID_CONFIG" not in str(e):
+                log.info(str(e))
+                self.fail("Deployment is expected to be failed but succeeded with function name more than 100 chars")
+
+    def test_deploy_function_with_prefix_length_greater_than_16_chars(self):
+        body = self.create_save_function_body(self.function_name, HANDLER_CODE.BUCKET_OPS_WITH_DOC_TIMER)
+        # Use an user_prefix greater than 16 chars
+        body['settings']['user_prefix'] = "eventingeventingeventingeventingeventingeventingeventingeventingeventing"
+        try:
+            self.deploy_function(body, deployment_fail=True)
+        except Exception as e:
+            if "ERR_INVALID_CONFIG" not in str(e):
+                log.info(str(e))
+                self.fail("Deployment is expected to be failed but succeeded with user_prefix greater than 16 chars")

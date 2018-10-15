@@ -30,13 +30,16 @@ class auditTest(BaseTestCase):
 
     def setUp(self):
         super(auditTest, self).setUp()
-        self.ipAddress = self.getLocalIPAddress()
+        try:
+            self.ipAddress = self.getLocalIPAddress()
+        except Exception, ex:
+            self.ipAddress = '127.0.0.1'
         self.eventID = self.input.param('id', None)
-	auditTemp = audit(host=self.master)
-	currentState = auditTemp.getAuditStatus()
-	self.log.info ("Current status of audit on ip - {0} is {1}".format(self.master.ip, currentState))
-	if not currentState:
-	    self.log.info ("Enabling Audit ")
+        auditTemp = audit(host=self.master)
+        currentState = auditTemp.getAuditStatus()
+        self.log.info("Current status of audit on ip - {0} is {1}".format(self.master.ip, currentState))
+        if not currentState:
+            self.log.info("Enabling Audit ")
             auditTemp.setAuditEnable('true')
             self.sleep(30)
         rest = RestConnection(self.master)

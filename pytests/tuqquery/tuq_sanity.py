@@ -2647,6 +2647,26 @@ class QuerySanityTests(QueryTests):
             expected_result = sorted(expected_result, key=lambda doc: (doc['job_title']))
             self._verify_results(actual_result, expected_result)
 
+        # https://issues.couchbase.com/browse/MB-29401
+    def test_sum_large_negative_numbers(self):
+        self.fail_if_no_buckets()
+
+        self.run_cbq_query("insert into default (KEY, VALUE) VALUES ('doc1',{ 'f1' : -822337203685477580 })")
+        self.run_cbq_query("insert into default (KEY, VALUE) VALUES ('doc2',{ 'f1' : -822337203685477580 })")
+        self.query = "select SUM(f1) from default"
+        result = self.run_cbq_query()
+        found_result = result['results'][0]['$1']
+        expected_result = -1644674407370955160
+        self.assertEqual(found_result, expected_result)
+
+        self.run_cbq_query("insert into default (KEY, VALUE) VALUES ('doc3',{ 'f2' : -822337203685477580 })")
+        self.run_cbq_query("insert into default (KEY, VALUE) VALUES ('doc4',{ 'f2' : 10 })")
+        self.query = "select SUM(f2) from default"
+        result = self.run_cbq_query()
+        found_result = result['results'][0]['$1']
+        expected_result = -822337203685477570
+        self.assertEqual(found_result, expected_result)
+
 ##############################################################################################
 #
 #   EXPLAIN
@@ -4108,3 +4128,50 @@ class QuerySanityTests(QueryTests):
         for bucket in self.buckets:
             self.query = "SELECT join_mo, sum_test from %s WHERE join_mo>7 group by join_mo letting sum_test = sum(tasks_points.task1)" % (bucket.name)
             self.prepared_common_body()
+
+    # https://issues.couchbase.com/browse/MB-26086
+    def check_special_symbols(self):
+        self.fail_if_no_buckets()
+        symbols = ['~','!','@','#','$','%','^','&','*','(',')','_','-','+','=','{','[','}',']','|','.',':',';','"','<',',','>','.','?','/']
+        errorsSimple = {}
+        errorsComplex = {}
+        query = "INSERT INTO default VALUES ('simple', {"
+
+        for i in range(len(symbols)):
+            query+="'a"+symbols[i]+"b':1"
+            if i<len(symbols)-1:
+                query+=","
+        query+="})"
+        self.run_cbq_query(query)
+
+        for i in range(len(symbols)):
+            query = "SELECT `a"+symbols[i]+"b` FROM default USE KEYS ['simple'] WHERE `a"+symbols[i]+"b` IS NOT MISSING"
+            result = self.run_cbq_query(query)
+            if result['metrics']['resultCount']<1:
+                errorsSimple[symbols[i]] = query
+        # Assuming I have only 3 special characters: ~!@ the resulting query will be like
+        # INSERT INTO default VALUES ('complex', {'a~b':{'a~b':12, 'a!b':12, 'a@b':12},
+        #                                         'a!b':{'a~b':12, 'a!b':12, 'a@b':12},
+        #                                         'a@b':{'a~b':12, 'a!b':12, 'a@b':12 }})
+        query = "INSERT INTO default VALUES ('complex', {"
+        for i in range(len(symbols)):
+            query+="'a"+symbols[i]+"b':{"
+            for j in range(len(symbols)):
+                query+= "'a"+symbols[j]+"b':12"
+                if j<len(symbols)-1:
+                    query+=","
+                else:
+                    query+="}"
+            if i<len(symbols)-1:
+                query+=","
+        query+="})"
+        self.run_cbq_query(query)
+
+        for i in range(len(symbols)):
+            for j in range(len(symbols)):
+                query = "SELECT `a"+symbols[i]+"b`.`a"+symbols[j]+"b` FROM default USE KEYS ['complex'] WHERE `a"+symbols[i]+"b`.`a"+symbols[j]+"b` IS NOT MISSING"
+                result = self.run_cbq_query(query)
+                if result['metrics']['resultCount']<1:
+                    errorsComplex[str(symbols[i])+str(symbols[j])] = query
+
+        self.assertEqual(len(errorsSimple)+len(errorsComplex), 0)

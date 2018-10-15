@@ -19,18 +19,25 @@ log = logging.getLogger()
 class EventingDataset(EventingBaseTest):
     def setUp(self):
         super(EventingDataset, self).setUp()
+        self.rest.set_service_memoryQuota(service='memoryQuota', memoryQuota=700)
         if self.create_functions_buckets:
+            self.replicas = self.input.param("replicas", 0)
             self.bucket_size = 100
+            # This is needed as we have increased the context size to 93KB. If this is not increased the metadata
+            # bucket goes into heavy DGM
+            self.metadata_bucket_size = 400
             log.info(self.bucket_size)
             bucket_params = self._create_bucket_params(server=self.server, size=self.bucket_size,
-                                                       replicas=self.num_replicas)
+                                                       replicas=self.replicas)
+            bucket_params_meta = self._create_bucket_params(server=self.server, size=self.metadata_bucket_size,
+                                                            replicas=self.replicas)
             self.cluster.create_standard_bucket(name=self.src_bucket_name, port=STANDARD_BUCKET_PORT + 1,
                                                 bucket_params=bucket_params)
             self.src_bucket = RestConnection(self.master).get_buckets()
             self.cluster.create_standard_bucket(name=self.dst_bucket_name, port=STANDARD_BUCKET_PORT + 1,
                                                 bucket_params=bucket_params)
             self.cluster.create_standard_bucket(name=self.metadata_bucket_name, port=STANDARD_BUCKET_PORT + 1,
-                                                bucket_params=bucket_params)
+                                                bucket_params=bucket_params_meta)
             self.buckets = RestConnection(self.master).get_buckets()
         self.gens_load = self.generate_docs(self.docs_per_day)
         self.expiry = 3
@@ -284,3 +291,25 @@ class EventingDataset(EventingBaseTest):
         for quota in range(256, 512, 4):
             self.rest.set_service_memoryQuota(service='eventingMemoryQuota', memoryQuota=quota)
             self.sleep(10)
+
+    def test_eventing_does_not_use_xattrs(self):
+        body = self.create_save_function_body(self.function_name, HANDLER_CODE.BUCKET_OPS_WITH_TIMERS,
+                                              dcp_stream_boundary="from_now")
+        # deploy eventing function
+        self.deploy_function(body)
+        url = 'couchbase://{ip}/{name}'.format(ip=self.master.ip, name=self.src_bucket_name)
+        bucket = Bucket(url, username="cbadminbucket", password="password")
+        for docid in ['customer123', 'customer1234', 'customer12345']:
+            bucket.upsert(docid, {'a': 1})
+        self.verify_eventing_results(self.function_name, 3, skip_stats_validation=True)
+        # add new multiple xattrs , delete old xattrs and delete the documents
+        for docid in ['customer123', 'customer1234', 'customer12345']:
+            r = bucket.mutate_in(docid, SD.get('eventing', xattr=True))
+            log.info(r)
+            if "Could not execute one or more multi lookups or mutations" not in str(r):
+                self.fail("eventing is still using xattrs for timers")
+            r = bucket.mutate_in(docid, SD.get('_eventing', xattr=True))
+            log.info(r)
+            if "Could not execute one or more multi lookups or mutations" not in str(r):
+                self.fail("eventing is still using xattrs for timers")
+        self.undeploy_and_delete_function(body)

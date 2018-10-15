@@ -32,11 +32,10 @@ class RbacBase:
             password = user['password']
             user_name = user['name']
             if source == 'ldap':
-                LdapUser(userid,password,host).user_setup()
+                return LdapUser(userid,password,host).user_setup()
             if source == 'builtin':
                 payload = "name=" + user_name + "&roles=&password=" + password
-                InternalUser(userid,payload,host).user_setup()
-
+                return InternalUser(userid,payload,host).user_setup()
 
     '''
     user_role_list = list of user information and role assignment
@@ -60,6 +59,8 @@ class RbacBase:
             if self.source == "ldap":
                 response = rest.set_user_roles(userid,payload)
             elif self.source == 'builtin':
+                if 'password' in user_role.keys():
+                    payload=payload+'&password='+user_role['password']
                 cluster_compatibility = rest.check_cluster_compatibility("5.0")
                 if cluster_compatibility is None:
                     pre_spock = True
@@ -67,7 +68,7 @@ class RbacBase:
                     pre_spock = not cluster_compatibility
                 if pre_spock:
                     return None
-                response = rest.add_set_builtin_user(userid,payload)
+                response = rest.add_set_builtin_user(userid, payload)
             response_return.append({'id':userid,'reponse':response})
         return response_return
 
@@ -96,10 +97,6 @@ class RbacBase:
         response = rest.check_user_permission(user,password,user_per_list)
         print response
         return response
-
-
-
-
 
 
 

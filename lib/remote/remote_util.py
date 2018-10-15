@@ -176,7 +176,7 @@ class RemoteMachineShellConnection:
 
     def __init__(self, username='root',
                  pkey_location='',
-                 ip=''):
+                 ip='', port=''):
         self.username = username
         self.use_sudo = True
         self.nonroot = False
@@ -192,6 +192,7 @@ class RemoteMachineShellConnection:
         # let's create a connection
         self._ssh_client = paramiko.SSHClient()
         self.ip = ip
+        self.port = port
         self.remote = (self.ip != "localhost" and self.ip != "127.0.0.1")
         self._ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         log.info('connecting to {0} with username : {1} pem key : {2}'.format(ip, username, pkey_location))
@@ -549,6 +550,23 @@ class RemoteMachineShellConnection:
             o, r = self.execute_command("kill "
                         " $(ps aux | grep 'beam.smp' | awk '{print $2}')")
             self.log_command_output(o, r)
+            all_killed = False
+            count = 0
+            while not all_killed and count < 6:
+                process_count = 0
+                self.sleep(2, "wait for erlang processes terminated")
+                out, _ = self.execute_command("ps aux | grep beam.smp")
+                for idx, val in enumerate(out):
+                    if "/opt/couchbase" in val:
+                        process_count += 1
+                if process_count == 0:
+                    all_killed = True
+                if count == 3:
+                    o, r = self.execute_command("kill "
+                        " $(ps aux | grep 'beam.smp' | awk '{print $2}')")
+                count += 1
+            if not all_killed:
+                raise Exception("Could not kill erlang process")
         return o, r
 
     def kill_cbft_process(self):
@@ -1567,12 +1585,13 @@ class RemoteMachineShellConnection:
                 self.execute_command(cmd, debug=False)
         log.info("done compact")
 
-    def set_vbuckets_win(self, vbuckets):
+    def set_vbuckets_win(self, build, vbuckets):
         bin_path = WIN_COUCHBASE_BIN_PATH
         bin_path = bin_path.replace("\\", "")
-        src_file = bin_path + "service_register.bat"
-        des_file = "/tmp/service_register.bat_{0}".format(self.ip)
-        local_file = "/tmp/service_register.bat.tmp_{0}".format(self.ip)
+        build = build.replace('-', '.')
+        src_file = bin_path + "install/cb_winsvc_start_{0}.bat".format(build)
+        des_file = "/tmp/cb_winsvc_start_{0}_{1}.bat".format(build, self.ip)
+        local_file = "/tmp/cb_winsvc_start_{0}_{1}.bat_tmp".format(build, self.ip)
 
         self.copy_file_remote_to_local(src_file, des_file)
         f1 = open(des_file, "r")
@@ -1603,22 +1622,23 @@ class RemoteMachineShellConnection:
         self.copy_file_local_to_remote(local_file, src_file)
 
         """ re-register new setup to cb server """
-        self.execute_command(WIN_COUCHBASE_BIN_PATH + "service_stop.bat")
-        self.execute_command(WIN_COUCHBASE_BIN_PATH + "service_unregister.bat")
-        self.execute_command(WIN_COUCHBASE_BIN_PATH + "service_register.bat")
-        self.execute_command(WIN_COUCHBASE_BIN_PATH + "service_start.bat")
-        self.sleep(10, "wait for cb server start completely after reset vbuckets!")
+        o, r = self.execute_command(WIN_COUCHBASE_BIN_PATH + "install/cb_winsvc_stop_{0}.bat".format(build))
+        self.log_command_output(o, r)
+        o, r = self.execute_command(WIN_COUCHBASE_BIN_PATH + "install/cb_winsvc_start_{0}.bat".format(build))
+        self.log_command_output(o, r)
+        self.sleep(20, "wait for cb server start completely after reset vbuckets!")
 
         """ remove temporary files on slave """
         os.remove(local_file)
         os.remove(des_file)
 
-    def set_fts_query_limit_win(self, name, value):
+    def set_fts_query_limit_win(self, build, name, value, ipv6=False):
         bin_path = WIN_COUCHBASE_BIN_PATH
         bin_path = bin_path.replace("\\", "")
-        src_file = bin_path + "service_register.bat"
-        des_file = "/tmp/service_register.bat_{0}".format(self.ip)
-        local_file = "/tmp/service_register.bat.tmp_{0}".format(self.ip)
+        build = build.replace('-', '.')
+        src_file = bin_path + "install/cb_winsvc_start_{0}.bat".format(build)
+        des_file = "/tmp/cb_winsvc_start_{0}_{1}.bat".format(build, self.ip)
+        local_file = "/tmp/cb_winsvc_start_{0}_{1}.bat_tmp".format(build, self.ip)
 
         self.copy_file_remote_to_local(src_file, des_file)
         f1 = open(des_file, "r")
@@ -1626,8 +1646,8 @@ class RemoteMachineShellConnection:
         """ when install new cb server on windows, there is not
             env CBFT_ENV_OPTIONS yet.  We need to insert this
             env to service_register.bat right after  ERL_FULLSWEEP_AFTER 512
-            like -env ERL_FULLSWEEP_AFTER 512 -env CBFT_ENV_OPTIONS vbuckets
-            where vbucket is params passed to function when run install scripts """
+            like -env ERL_FULLSWEEP_AFTER 512 -env CBFT_ENV_OPTIONS value
+            where value is params passed to function when run install scripts """
         for line in f1:
             if "-env CBFT_ENV_OPTIONS " in line:
                 tmp1 = line.split("CBFT_ENV_OPTIONS")
@@ -1649,11 +1669,14 @@ class RemoteMachineShellConnection:
         self.copy_file_local_to_remote(local_file, src_file)
 
         """ re-register new setup to cb server """
-        self.execute_command(WIN_COUCHBASE_BIN_PATH + "service_stop.bat")
-        self.execute_command(WIN_COUCHBASE_BIN_PATH + "service_unregister.bat")
-        self.execute_command(WIN_COUCHBASE_BIN_PATH + "service_register.bat")
-        self.execute_command(WIN_COUCHBASE_BIN_PATH + "service_start.bat")
-        self.sleep(10, "wait for cb server start completely after setting CBFT_ENV_OPTIONS")
+        o, r = self.execute_command(WIN_COUCHBASE_BIN_PATH + "install/cb_winsvc_stop_{0}.bat ".format(build))
+        self.log_command_output(o, r)
+        cmd = WIN_COUCHBASE_BIN_PATH + "install/cb_winsvc_start_{0}.bat".format(build)
+        if ipv6:
+            cmd += " true"
+        o, r = self.execute_command(cmd)
+        self.log_command_output(o, r)
+        self.sleep(20, "wait for cb server start completely after setting CBFT_ENV_OPTIONS")
 
         """ remove temporary files on slave """
         os.remove(local_file)
@@ -1746,7 +1769,7 @@ class RemoteMachineShellConnection:
             if self.info.deliverable_type in linux:
                 o, e = \
                     self.execute_command("sed -i 's/export PATH/export PATH\\n"
-                            "export CBFT_ENV_OPTIONS=bleveMaxResultWindow={1},hideUI=false/'\
+                            "export CBFT_ENV_OPTIONS=bleveMaxResultWindow={1}/'\
                             {2}opt/{0}/bin/{0}-server".format(server_type, int(fts_query_limit),
                                                               nonroot_path_start))
                 success &= self.log_command_output(o, e, track_words)
@@ -1822,7 +1845,7 @@ class RemoteMachineShellConnection:
     """
     def install_server(self, build, startserver=True, path='/tmp', vbuckets=None,
                        swappiness=10, force=False, openssl='', upr=None, xdcr_upr=None,
-                       fts_query_limit=None, enable_ipv6=None):
+                       fts_query_limit=None, cbft_env_options=None, enable_ipv6=None):
 
         log.info('*****install server ***')
         server_type = None
@@ -1860,12 +1883,13 @@ class RemoteMachineShellConnection:
                 sys.exit("*****  Node %s failed to install  *****" % (self.ip))
             self.sleep(10, "wait for server to start up completely")
             if vbuckets and int(vbuckets) != 1024:
-                self.set_vbuckets_win(vbuckets)
+                self.set_vbuckets_win(build.version_number, vbuckets)
             if fts_query_limit:
                 self.set_environment_variable(
                     name="CBFT_ENV_OPTIONS",
                     value="bleveMaxResultWindow={0}".format(int(fts_query_limit))
                 )
+
 
             output, error = self.execute_command("rm -f \
                        /cygdrive/c/automation/*_{0}_install.iss".format(self.ip))
@@ -1997,11 +2021,24 @@ class RemoteMachineShellConnection:
                                                             nonroot_path_start))
                 success &= self.log_command_output(output, error, track_words)
             if fts_query_limit:
-                output, error = \
-                    self.execute_command("sed -i 's/export PATH/export PATH\\n"
-                            "export CBFT_ENV_OPTIONS=bleveMaxResultWindow={1},hideUI=false/'\
-                            {2}opt/{0}/bin/{0}-server".format(server_type, int(fts_query_limit),
-                                                              nonroot_path_start))
+                if cbft_env_options:
+                    output, error = \
+                        self.execute_command("sed -i 's/export PATH/export PATH\\n"
+                                             "export CBFT_ENV_OPTIONS=bleveMaxResultWindow={1},{2}/'\
+                                             {3}opt/{0}/bin/{0}-server".format(server_type,
+                                                                               int(fts_query_limit),
+                                                                               cbft_env_options.replace(':','='),
+                                                                               nonroot_path_start))
+                else:
+                    output, error = \
+                        self.execute_command("sed -i 's/export PATH/export PATH\\n"
+                                "export CBFT_ENV_OPTIONS=bleveMaxResultWindow={1}/'\
+                                {2}opt/{0}/bin/{0}-server".format(server_type, int(fts_query_limit),
+                                                                  nonroot_path_start))
+                success &= self.log_command_output(output, error, track_words)
+                startserver = True
+
+
                 success &= self.log_command_output(output, error, track_words)
                 startserver = True
 
@@ -2051,11 +2088,13 @@ class RemoteMachineShellConnection:
 
     def install_server_win(self, build, version, startserver=True,
                            vbuckets=None, fts_query_limit=None,
-                           enable_ipv6=None, windows_msi=False):
+                           enable_ipv6=None, windows_msi=False, cbft_env_options=None):
 
 
         log.info('******start install_server_win ********')
         if windows_msi:
+            self.remove_win_backup_dir()
+            self.remove_win_collect_tmp()
             if enable_ipv6:
                 output, error = self.execute_command("cd /cygdrive/c/tmp;"
                                                  "msiexec /i {0}.msi USE_IPV6=true /qn "\
@@ -2067,8 +2106,10 @@ class RemoteMachineShellConnection:
             self.log_command_output(output, error)
             if fts_query_limit:
                 self.set_fts_query_limit_win(
+                    build = version,
                     name="CBFT_ENV_OPTIONS",
-                    value="bleveMaxResultWindow={0}".format(int(fts_query_limit))
+                    value="bleveMaxResultWindow={0}".format(int(fts_query_limit)),
+                    ipv6=enable_ipv6
                 )
             return len(error) == 0
         remote_path = None
@@ -2130,11 +2171,13 @@ class RemoteMachineShellConnection:
             output, error = self.execute_command("rm -f *-diag.zip")
             self.log_command_output(output, error, track_words)
             if vbuckets and int(vbuckets) != 1024:
-                self.set_vbuckets_win(vbuckets)
+                self.set_vbuckets_win(build.version_number, vbuckets)
             if fts_query_limit:
                 self.set_fts_query_limit_win(
+                    build = version,
                     name="CBFT_ENV_OPTIONS",
-                    value="bleveMaxResultWindow={0}".format(int(fts_query_limit))
+                    value="bleveMaxResultWindow={0}".format(int(fts_query_limit)),
+                    ipv6=enable_ipv6
                 )
 
             if "4.0" in version[:5]:
@@ -2383,7 +2426,8 @@ class RemoteMachineShellConnection:
                          "/var/membase/data/*", "/opt/membase/var/lib/membase/*",
                          "/opt/couchbase", "/data/*"]
         terminate_process_list = ["beam.smp", "memcached", "moxi", "vbucketmigrator",
-                                  "couchdb", "epmd", "memsup", "cpu_sup", "goxdcr", "erlang", "eventing"]
+                                  "couchdb", "epmd", "memsup", "cpu_sup", "goxdcr", "erlang", "eventing", "erl", "godu",
+                                  "goport", "gosecrets", "projector"]
         self.extract_remote_info()
         log.info(self.info.distribution_type)
         type = self.info.distribution_type.lower()
@@ -2673,6 +2717,11 @@ class RemoteMachineShellConnection:
                     if error:
                         server_ip = "\n\n**** Uninstalling on server: {0} ****".format(self.ip)
                         error.insert(0, server_ip)
+                    self.log_command_output(output, error)
+                    output, error = self.execute_command("pkill -u couchbase")
+                    self.log_command_output(output, error)
+                    # This line is added for debugging purposes
+                    output, error = self.execute_command("ps -ef | grep couchbase")
                     self.log_command_output(output, error)
             self.terminate_processes(self.info, terminate_process_list)
             if not self.nonroot:
@@ -3103,7 +3152,7 @@ class RemoteMachineShellConnection:
 
         return self.execute_command_raw(command, debug=debug, use_channel=use_channel)
 
-    def execute_command_raw(self, command, debug=True, use_channel=False):
+    def execute_command_raw(self, command, debug=True, use_channel=False, timeout=420):
         if debug:
             log.info("running command.raw on {0}: {1}".format(self.ip, command))
         output = []
@@ -3124,7 +3173,7 @@ class RemoteMachineShellConnection:
             channel.close()
             stdin.close()
         elif self.remote:
-            stdin, stdout, stderro = self._ssh_client.exec_command(command)
+            stdin, stdout, stderro = self._ssh_client.exec_command(command, timeout=timeout)
             stdin.close()
 
         if not self.remote:
@@ -3403,6 +3452,11 @@ class RemoteMachineShellConnection:
         else:
             ret = self.execute_command_raw('hostname -d', debug=False)
         return ret
+
+    def get_aws_public_hostname(self):
+        #AWS supported url to retrieve metadata like public hostname of an instance from shell
+        output, _ = self.execute_command("curl -s http://169.254.169.254/latest/meta-data/public-hostname")
+        return output[0]
 
     def get_full_hostname(self):
         info = self.extract_remote_info()
@@ -4467,6 +4521,9 @@ class RemoteMachineShellConnection:
         if self.info.deliverable_type == "deb":
             for lib_name in MISSING_UBUNTU_LIB:
                 if lib_name != "":
+                    if lib_name == "libcurl3" and \
+                        self.info.distribution_version.lower() == "ubuntu 18.04":
+                        lib_name = "libcurl4"
                     log.info("prepare install library {0}".format(lib_name))
                     o, r = self.execute_command("apt-get install -y {0}".format(lib_name))
                     self.log_command_output(o, r)
@@ -4608,6 +4665,34 @@ class RemoteMachineShellConnection:
         self.sleep(5, "==== delay kill pid %d in 5 seconds to printout message ==="\
                                                                       % os.getpid())
         os.system('kill %d' % os.getpid())
+
+    def enable_diag_eval_on_non_local_hosts(self, state=True):
+        """
+        Enable diag/eval to be run on non-local hosts.
+        :return: Command output and error if any.
+        """
+        if self.input.membase_settings.rest_username:
+            rest_username = self.input.membase_settings.rest_username
+        else:
+            log.info("*** You need to set rest username at ini file ***")
+            rest_username = "Administrator"
+        if self.input.membase_settings.rest_password:
+            rest_password = self.input.membase_settings.rest_password
+        else:
+            log.info("*** You need to set rest password at ini file ***")
+            rest_password = "password"
+        command = "curl http://{0}:{1}@localhost:{2}/diag/eval -X POST -d " \
+                  "'ns_config:set(allow_nonlocal_eval, {3}).'".format(rest_username, rest_password,
+                                                                      self.port, state.__str__().lower())
+        server = {"ip": self.ip, "username": rest_username, "password": rest_password, "port": self.port}
+        rest_connection = RestConnection(server)
+        is_cluster_compatible = rest_connection.check_cluster_compatibility("5.5")
+        if (not is_cluster_compatible):
+            log.info("Enabling diag/eval on non-local hosts is available only post 5.5.2 or 6.0 releases")
+            return None, "Enabling diag/eval on non-local hosts is available only post 5.5.2 or 6.0 releases"
+        output, error = self.execute_command(command)
+        return output, error
+
 
 class RemoteUtilHelper(object):
 

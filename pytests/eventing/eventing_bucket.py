@@ -15,19 +15,22 @@ log = logging.getLogger()
 class EventingBucket(EventingBaseTest):
     def setUp(self):
         super(EventingBucket, self).setUp()
-        self.rest.set_service_memoryQuota(service='memoryQuota', memoryQuota=500)
+        self.rest.set_service_memoryQuota(service='memoryQuota', memoryQuota=700)
         if self.create_functions_buckets:
             self.bucket_size = 100
+            self.metadata_bucket_size = 400
             log.info(self.bucket_size)
             bucket_params = self._create_bucket_params(server=self.server, size=self.bucket_size,
                                                        replicas=self.num_replicas)
+            bucket_params_meta = self._create_bucket_params(server=self.server, size=self.metadata_bucket_size,
+                                                            replicas=self.num_replicas)
             self.cluster.create_standard_bucket(name=self.src_bucket_name, port=STANDARD_BUCKET_PORT + 1,
                                                 bucket_params=bucket_params)
             self.src_bucket = RestConnection(self.master).get_buckets()
             self.cluster.create_standard_bucket(name=self.dst_bucket_name, port=STANDARD_BUCKET_PORT + 1,
                                                 bucket_params=bucket_params)
             self.cluster.create_standard_bucket(name=self.metadata_bucket_name, port=STANDARD_BUCKET_PORT + 1,
-                                                bucket_params=bucket_params)
+                                                bucket_params=bucket_params_meta)
             self.buckets = RestConnection(self.master).get_buckets()
         self.gens_load = self.generate_docs(self.docs_per_day)
         self.expiry = 3
@@ -67,17 +70,30 @@ class EventingBucket(EventingBaseTest):
     def test_eventing_with_ephemeral_buckets_with_lww_enabled(self):
         # delete existing couchbase buckets which will be created as part of setup
         for bucket in self.buckets:
-            self.rest.delete_bucket(bucket.name)
+            # Having metadata bucket as an ephemeral bucket is a bad idea
+            if bucket.name != "metadata":
+                self.rest.delete_bucket(bucket.name)
         # create ephemeral buckets with the same name
         bucket_params = self._create_bucket_params(server=self.server, size=self.bucket_size,
                                                    replicas=self.num_replicas,
                                                    bucket_type='ephemeral', eviction_policy='noEviction', lww=True)
         tasks = []
         for bucket in self.buckets:
-            tasks.append(self.cluster.async_create_standard_bucket(name=bucket.name, port=STANDARD_BUCKET_PORT + 1,
-                                                                   bucket_params=bucket_params))
+            # Having metadata bucket as an ephemeral bucket is a bad idea
+            if bucket.name != "metadata":
+                tasks.append(self.cluster.async_create_standard_bucket(name=bucket.name, port=STANDARD_BUCKET_PORT + 1,
+                                                                       bucket_params=bucket_params))
         for task in tasks:
             task.result()
+        n1ql_node = self.get_nodes_from_services_map(service_type="n1ql")
+        n1ql_helper = N1QLHelper(shell=self.shell, max_verify=self.max_verify, buckets=self.buckets,
+                                      item_flag=self.item_flag, n1ql_port=self.n1ql_port,
+                                      full_docs_list=self.full_docs_list, log=self.log, input=self.input,
+                                      master=self.master, use_rest=True)
+        for bucket in self.buckets:
+            if bucket.name != "metadata":
+                query="CREATE PRIMARY INDEX ON %s " % bucket.name
+                n1ql_helper.run_cbq_query(query=query,server=n1ql_node)
         try:
             # load data
             self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
@@ -95,6 +111,24 @@ class EventingBucket(EventingBaseTest):
                       batch_size=self.batch_size, op_type='delete')
         except:
             pass
+        # Wait for eventing to catch up with all the delete mutations and verify results
+        self.verify_eventing_results(self.function_name, 0, skip_stats_validation=True)
+        self.undeploy_and_delete_function(body)
+        # intentionally added , as it requires some time for eventing-consumers to shutdown
+        self.sleep(30)
+        self.assertTrue(self.check_if_eventing_consumers_are_cleaned_up(),
+                        msg="eventing-consumer processes are not cleaned up even after undeploying the function")
+
+    def test_eventing_with_with_the_couchbase_buckets_in_heavy_dgm(self):
+        self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
+                  batch_size=self.batch_size)
+        body = self.create_save_function_body(self.function_name, self.handler_code)
+        self.deploy_function(body)
+        # Wait for eventing to catch up with all the update mutations and verify results
+        self.verify_eventing_results(self.function_name, self.docs_per_day * 2016, skip_stats_validation=True)
+        # delete all documents
+        self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
+                  batch_size=self.batch_size, op_type='delete')
         # Wait for eventing to catch up with all the delete mutations and verify results
         self.verify_eventing_results(self.function_name, 0, skip_stats_validation=True)
         self.undeploy_and_delete_function(body)
@@ -255,16 +289,18 @@ class EventingBucket(EventingBaseTest):
         body1['depcfg']['buckets'].append({"alias": self.src_bucket_name, "bucket_name": self.src_bucket_name})
         self.deploy_function(body1)
         # Wait for eventing to catch up with all the create mutations and verify results
-        self.verify_eventing_results(self.function_name, self.docs_per_day * 4032, skip_stats_validation=True)
-        self.verify_eventing_results(self.function_name + "_1", self.docs_per_day * 4032, skip_stats_validation=True,
-                                     bucket=self.src_bucket_name)
+        # See DOC-3612
+        # self.verify_eventing_results(self.function_name, self.docs_per_day * 4032, skip_stats_validation=True)
+        # self.verify_eventing_results(self.function_name + "_1", self.docs_per_day * 4032, skip_stats_validation=True,
+        #                             bucket=self.src_bucket_name)
         self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
                   batch_size=self.batch_size, op_type='delete')
         self.cluster.load_gen_docs(self.master, self.dst_bucket_name, gen_load_non_json_del, self.buckets[0].kvs[1],
                                    'delete', compression=self.sdk_compression)
-        self.verify_eventing_results(self.function_name, 0, skip_stats_validation=True)
-        self.verify_eventing_results(self.function_name + "_1", 0, skip_stats_validation=True,
-                                     bucket=self.src_bucket_name)
+        # See DOC-3612
+        #self.verify_eventing_results(self.function_name, 0, skip_stats_validation=True)
+        #self.verify_eventing_results(self.function_name + "_1", 0, skip_stats_validation=True,
+        #                             bucket=self.src_bucket_name)
         self.undeploy_and_delete_function(body)
         self.undeploy_and_delete_function(body1)
 
@@ -379,3 +415,65 @@ class EventingBucket(EventingBaseTest):
         self.sleep(30)
         self.assertTrue(self.check_if_eventing_consumers_are_cleaned_up(),
                         msg="eventing-consumer processes are not cleaned up even after undeploying the function")
+
+    #MB-31126
+    def test_bucket_overhead(self):
+        body = self.create_save_function_body(self.function_name, HANDLER_CODE.BUCKET_OPS_WITH_CRON_TIMER,
+                                              worker_count=3)
+        # create an alias so that src bucket as well so that we can read data from source bucket
+        body['depcfg']['buckets'].append({"alias": self.src_bucket_name, "bucket_name": self.src_bucket_name})
+        self.deploy_function(body)
+        # sleep intentionally added as we are validating no mutations are processed by eventing
+        self.sleep(60)
+        countMap=self.get_buckets_itemCount()
+        initalDoc=countMap["metadata"]
+        # load some data
+        self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
+                  batch_size=self.batch_size)
+        # Wait for eventing to catch up with all the delete mutations and verify results
+        self.verify_eventing_results(self.function_name, 2016*self.docs_per_day, skip_stats_validation=True)
+        countMap = self.get_buckets_itemCount()
+        finalDoc=countMap["metadata"]
+        if(initalDoc !=finalDoc):
+            n1ql_node = self.get_nodes_from_services_map(service_type="n1ql")
+            n1ql_helper = N1QLHelper(shell=self.shell, max_verify=self.max_verify, buckets=self.buckets,
+                                          item_flag=self.item_flag, n1ql_port=self.n1ql_port,
+                                          full_docs_list=self.full_docs_list, log=self.log, input=self.input,
+                                          master=self.master, use_rest=True)
+            n1ql_helper.create_primary_index(using_gsi=True, server=n1ql_node)
+            query1="select meta().id from metadata where meta().id not like 'eventing::%::vb::%'" \
+                  " and meta().id not like 'eventing::%:rt:%' and meta().id not like 'eventing::%:sp'"
+            result1=n1ql_helper.run_cbq_query(query=query1,server=n1ql_node)
+            print(result1)
+            query2="select meta().id from metadata where meta().id like 'eventing::%:sp' and sta != stp"
+            result2 = n1ql_helper.run_cbq_query(query=query2, server=n1ql_node)
+            print(result2)
+            query3="select meta().id from meta where meta().id like 'eventing::%:rt:%'"
+            result3=n1ql_helper.run_cbq_query(query=query3, server=n1ql_node)
+            print(result3)
+            self.fail("initial doc in metadata {} is not equals to final doc in metadata {}".format(initalDoc,finalDoc))
+        self.undeploy_and_delete_function(body)
+
+    #MB-30973
+    def test_cleanup_metadata(self):
+        body = self.create_save_function_body(self.function_name, HANDLER_CODE.BUCKET_OPS_WITH_CRON_TIMER,
+                                              worker_count=3)
+        # create an alias so that src bucket as well so that we can read data from source bucket
+        body['depcfg']['buckets'].append({"alias": self.src_bucket_name, "bucket_name": self.src_bucket_name})
+        self.deploy_function(body)
+        # sleep intentionally added as we are validating no mutations are processed by eventing
+        self.sleep(60)
+        countMap = self.get_buckets_itemCount()
+        initalDoc = countMap["metadata"]
+        # load some data
+        self.load(self.gens_load, buckets=self.src_bucket, flag=self.item_flag, verify_data=False,
+                  batch_size=self.batch_size)
+        # Wait for eventing to catch up with all the delete mutations and verify results
+        self.verify_eventing_results(self.function_name, 2016 * self.docs_per_day, skip_stats_validation=True)
+        self.undeploy_and_delete_function(body)
+        countMap = self.get_buckets_itemCount()
+        finalDoc = countMap["metadata"]
+        assert int(finalDoc) == 0
+
+
+

@@ -17,7 +17,7 @@ from mc_bin_client import MemcachedClient, MemcachedError
 from mc_ascii_client import MemcachedAsciiClient
 from memcached.helper.old_kvstore import ClientKeyValueStore
 from membase.api.rest_client import RestConnection, RestHelper, Bucket, vBucket
-from memcacheConstants import ERR_NOT_FOUND, ERR_NOT_MY_VBUCKET, ERR_ETMPFAIL, ERR_EINVAL
+from memcacheConstants import ERR_NOT_FOUND, ERR_NOT_MY_VBUCKET, ERR_ETMPFAIL, ERR_EINVAL, ERR_2BIG
 import json
 import sys
 from perf_engines import mcsoda
@@ -1123,7 +1123,14 @@ class VBucketAwareMemcached(object):
             else:
                 time.sleep(pause)
                 self.reset_vbuckets(self.rest, self._get_vBucket_ids(keyval.keys()))
-                rec_caller_fn(exp, flags, keyval, pause, timeout - pause)  # Start all over again for these key vals.
+                try:
+                    rec_caller_fn(exp, flags, keyval, pause, timeout - pause)  # Start all over again for these key vals.
+                except MemcachedError as error:
+                    if error.status == ERR_2BIG:
+                        self.log.info("<MemcachedError #%d ``%s''>" % (error.status, error.msg))
+                        return []
+                    else:
+                        return [error]
                 return []  # Note: If used for async,too many recursive threads could get spawn here.
         except (EOFError, socket.error), error:
             try:

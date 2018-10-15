@@ -1,11 +1,14 @@
 function OnUpdate(doc,meta) {
-    var expiry = Math.round((new Date()).getTime() / 1000) + 300;
+    var expiry = new Date();
+    expiry.setSeconds(expiry.getSeconds() + 300);
     var time_rand = random_gen();
-    cronTimer(NDtimerCallback, expiry, time_rand+'');
+    var doc_id = time_rand + ' ';
+    var context = {docID : doc_id, random_text : "e6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh0R7Aumoe6cZZGHuh07Aumoe6cZZGHuh07Aumoe6cZZGHuh07Aumoe6"};
+    createTimer(NDtimerCallback,  expiry, meta.id, context);
 }
-function NDtimerCallback(docid) {
+function NDtimerCallback(context) {
     try {
-        dst_bucket[docid] = 'from NDtimerCallback';
+        dst_bucket[context.docID] = context.random_text;
     } catch(e) {
         //var time_rand = random_gen();
         //dst_bucket[time_rand] = 'from NDtimerCallback';

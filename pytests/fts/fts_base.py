@@ -622,6 +622,27 @@ class FTSIndex:
                 self.index_definition['params']['store'] = {}
             self.index_definition['params']['store']['kvStoreMossAllow'] = False
 
+    def is_scorch(self):
+        return self.get_index_type() == "scorch"
+
+    def is_upside_down(self):
+        return self.get_index_type() == "upside_down"
+
+    def is_type_unspecified(self):
+        return self.get_index_type() ==  None
+
+    def get_index_type(self):
+        try:
+            _, defn = self.get_index_defn()
+            index_type = defn['indexDef']['params']['store']['indexType']
+            self.__log.info("Index type of {0} is {1}".
+                          format(self.name,
+                                 defn['indexDef']['params']['store']['indexType']))
+            return index_type
+        except Exception:
+            self.__log.error("No 'indexType' present in index definition")
+            return None
+
     def generate_new_custom_map(self, seed):
         from custom_map_generator.map_generator import CustomMapGenerator
         cm_gen = CustomMapGenerator(seed=seed, dataset=self.dataset,
@@ -892,6 +913,46 @@ class FTSIndex:
             self.name,
             rest.ip))
         rest.update_fts_index(self.name, self.index_definition)
+
+    def update_index_to_upside_down(self):
+        if self.is_upside_down():
+            self.__log.info("The index {0} is already upside_down index, conversion not needed!")
+        else:
+            self.index_definition['params']['store']['indexType'] = "upside_down"
+            self.index_definition['uuid'] = self.get_uuid()
+            self.update()
+            time.sleep(5)
+            _, defn = self.get_index_defn()
+            if defn['indexDef']['params']['store']['indexType'] == "upside_down":
+                self.__log.info("SUCCESS: The index type is now upside_down!")
+            else:
+                self.__log.error("defn['indexDef']['params']['store']['indexType']")
+                raise Exception("Unable to convert index to upside_down")
+
+    def update_index_to_scorch(self):
+        if self.is_scorch():
+            self.__log.info("The index {0} is already scorch index, conversion not needed!")
+        else:
+            self.index_definition['params']['store']['indexType'] = "scorch"
+            self.index_definition['uuid'] = self.get_uuid()
+            self.update()
+            time.sleep(5)
+            _, defn = self.get_index_defn()
+            if defn['indexDef']['params']['store']['indexType'] == "scorch":
+                self.__log.info("SUCCESS: The index type is now scorch!")
+            else:
+                self.__log.error("defn['indexDef']['params']['store']['indexType']")
+                raise Exception("Unable to convert index to scorch")
+
+    def update_num_pindexes(self, new):
+        self.index_definition['planParams']['maxPartitionsPerPIndex'] = new
+        self.index_definition['uuid'] = self.get_uuid()
+        self.update()
+
+    def update_num_replicas(self, new):
+        self.index_definition['planParams']['numReplicas'] = new
+        self.index_definition['uuid'] = self.get_uuid()
+        self.update()
 
     def delete(self, rest=None):
         if not rest:
@@ -3002,16 +3063,15 @@ class FTSBaseTest(unittest.TestCase):
         self._cb_cluster.init_cluster(self._cluster_services,
                                       self._input.servers[1:])
 
+        self._enable_diag_eval_on_non_local_hosts()
         # Add built-in user
         testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
         RbacBase().create_user_source(testuser, 'builtin', master)
-        time.sleep(10)
-
+        
         # Assign user to role
         role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
         RbacBase().add_user_role(role_list, RestConnection(master), 'builtin')
-        time.sleep(10)
-
+        
         self.__set_free_servers()
         if not no_buckets:
             self.__create_buckets()
@@ -3027,6 +3087,25 @@ class FTSBaseTest(unittest.TestCase):
         if len(self.__report_error_list) > 0:
             self.__initialize_error_count_dict()
 
+    def _enable_diag_eval_on_non_local_hosts(self):
+        """
+        Enable diag/eval to be run on non-local hosts.
+        :return: Nothing
+        """
+        master = self._cb_cluster.get_master_node()
+        remote = RemoteMachineShellConnection(master)
+        output, error = remote.enable_diag_eval_on_non_local_hosts()
+        if output is not None:
+            if "ok" not in output:
+                self.log.error("Error in enabling diag/eval on non-local hosts on {}".format(master.ip))
+                raise Exception("Error in enabling diag/eval on non-local hosts on {}".format(master.ip))
+            else:
+                self.log.info(
+                    "Enabled diag/eval for non-local hosts from {}".format(
+                        master.ip))
+        else:
+            self.log.info("Running in compatibility mode, not enabled diag/eval for non-local hosts")
+    
     def construct_serv_list(self, serv_str):
         """
             Constructs a list of node services
@@ -3518,7 +3597,7 @@ class FTSBaseTest(unittest.TestCase):
                     num_mutations_to_index = index.get_num_mutations_to_index()
                     if num_mutations_to_index > 0:
                         self.sleep(5, "num_mutations_to_index: {0} > 0".format(num_mutations_to_index))
-                        retry_mut_count -= 1
+                        retry_count -= 1
                     else:
                         break
 

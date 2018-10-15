@@ -1,19 +1,15 @@
-import logging
-import threading
-import json
-import uuid
-import time
-import os
 from tuq import QueryTests
 from membase.api.exception import CBQError, ReadDocumentException
+
 
 class QueryANSIJOINSTests(QueryTests):
     def setUp(self):
         super(QueryANSIJOINSTests, self).setUp()
         self.log.info("==============  QueryANSIJOINSTests setup has started ==============")
+        if self.load_sample:
+            self.rest.load_sample("travel-sample")
         self.log.info("==============  QueryANSIJOINSTests setup has completed ==============")
         self.log_config_info()
-
 
     def suite_setUp(self):
         super(QueryANSIJOINSTests, self).suite_setUp()
@@ -100,6 +96,26 @@ class QueryANSIJOINSTests(QueryTests):
         query = "select * from default d RIGHT OUTER JOIN `travel-sample` t  ON (t.id == d.join_day) INNER JOIN " \
                 "default d1 ON (t.id == d1.join_mo) limit 1000"
         queries_to_run.append((query, 1000))
+        self.run_common_body(index_list=idx_list, queries_to_run=queries_to_run)
+
+    ''' The right hand side of a join can be an expression, it needs to be a key space (a bucket)
+            -Run a query where the right hand expression is a subquery
+            -Run a query where the right hand expression is another join'''
+    def test_join_right_hand_expression(self):
+
+        idx_list = []
+        queries_to_run = []
+        idx = "CREATE INDEX name on default(name)"
+        idx_list.append((idx, ("default", "name")))
+
+        query_1 = "select * from default d INNER JOIN (select * from default d1 where d1.name == 'ajay') d2 ON (d.name = d2.name)"
+
+        queries_to_run.append((query_1, 0))
+
+        query_2 ="select * from default d INNER JOIN (select * from default d1 inner join default d3 on " \
+        "d1.name == d3.name LIMIT 100) d2 ON (d.name = d3.name) LIMIT 100"
+        queries_to_run.append((query_2, 100))
+
         self.run_common_body(index_list=idx_list, queries_to_run=queries_to_run)
 
 ##############################################################################################
@@ -320,6 +336,8 @@ class QueryANSIJOINSTests(QueryTests):
         queries_to_run.append((query, 5))
         self.run_common_body(index_list=idx_list, queries_to_run=queries_to_run)
 
+
+
 ##############################################################################################
 #
 #   Negative tests
@@ -375,26 +393,6 @@ class QueryANSIJOINSTests(QueryTests):
             self.assertTrue("syntax error - at RIGHT" in str(error),
                             "The error message is incorrect. The error message given by the server is %s" % error)
 
-    ''' The right hand side of a join cannot be an expression, it needs to be a key space (a bucket)
-            -Run a query where the right hand expression is a subquery
-            -Run a query where the right hand expression is another join (join is invalid but it should not matter, it 
-             will not execute because the RHS is not a key space'''
-    def test_join_right_hand_expression(self):
-        try:
-            query_1 = "select * from default d INNER JOIN (select * from default d where d.name == 'ajay') d2 ON (d1.name = d2.name)"
-            self.run_cbq_query(query = query_1)
-        except CBQError as error:
-            self.assertTrue("ANSI JOIN must be done on a keyspace. - at end of input" in str(error),
-                            "The error message is incorrect. It should have been %s" % error)
-
-        try:
-            query_1 = "select * from default d INNER JOIN (select * from default d inner join default d3 on " \
-                      "d1.name == d3.name) d2 ON (d1.name = d2.name)"
-            self.run_cbq_query(query = query_1)
-        except CBQError as error:
-            self.assertTrue("ANSI JOIN must be done on a keyspace. - at end of input" in str(error),
-                            "The error message is incorrect. It should have been %s" % error)
-
     ''' Try to mix the old join syntax with the new ansi join syntax, the syntax mixing should not be allowed
             -Run a query that mixes the old join syntax with a new syntax'''
     def test_mixed_syntax(self):
@@ -402,7 +400,7 @@ class QueryANSIJOINSTests(QueryTests):
             query_1 = "select * from default d1 INNER JOIN default d2 on keys (d1._id) INNER JOIN default d4 on (d2.name == d4.name) "
             self.run_cbq_query(query = query_1)
         except CBQError as error:
-            self.assertTrue("Cannot mix non ANSI JOIN on d2 and ANSI JOIN on d4. - at end of input" in str(error),
+            self.assertTrue("Cannot mix non ANSI JOIN on d2 with ANSI JOIN on d4." in str(error),
                             "The error message is incorrect. The error message given by the server is %s" % error)
 
     ''' Test a join that contains array-indexing
@@ -439,7 +437,7 @@ class QueryANSIJOINSTests(QueryTests):
                     "== li.lineitem_id)"
             self.run_cbq_query(query=query)
         except CBQError as error:
-            self.assertTrue("Cannot mix non ANSI NEST on li and ANSI JOIN on d1. - at end of input" in str(error),
+            self.assertTrue("Cannot mix non ANSI NEST on li with ANSI JOIN on d1." in str(error),
                             "The error message is incorrect. It should have been %s" % error)
 
 ##############################################################################################
