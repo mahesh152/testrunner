@@ -226,7 +226,7 @@ class Dispatcher:
         print('\n\n')
 
 
-        launchStringBase = 'http://qa.sc.couchbase.com/job/test_suite_executor'
+        launchStringBase = 'http://qa.sc.couchbase.com/job/aws_test_suite_executor'
 
         # optional add [-docker] [-Jenkins extension]
         if options.serverType.lower() == 'docker':
@@ -435,7 +435,7 @@ class Dispatcher:
 class CloundDispatcher(Dispatcher):
     # returning high number as in cloud we can have high number of servers available
     def getNumberOfAvailableServers(self, getAvailUrl):
-        response = Response()
+        response = Response({"status": 200, "Content": "Test"})
         response.status = 200
         return response, "128"
 
@@ -465,7 +465,7 @@ def main():
     parser.add_option('-u', '--url', dest='url', default=None)
     parser.add_option('-j', '--jenkins', dest='jenkins', default=None)
     parser.add_option('-b', '--branch', dest='branch', default='master')
-    parser.add_option('-c', '--cloud', dest='cloud', default=None)
+    parser.add_option('-l', '--cloud', dest='cloud', default=None)
 
     # dashboardReportedParameters is of the form param1=abc,param2=def
     parser.add_option('-d', '--dashboardReportedParameters', dest='dashboardReportedParameters', default=None)
@@ -484,8 +484,8 @@ def main():
 
     print('the reportedParameters are', options.dashboardReportedParameters)
 
-    if(options.cloud):
-        d = CloundDispatcher
+    if options.cloud:
+        d = CloundDispatcher()
     else:
         d = Dispatcher()
     d.main(options)
